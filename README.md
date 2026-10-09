@@ -2,7 +2,7 @@
 
 AI adaptive time-management engine for students (hackathon MVP).
 
-SIKAD is a working, clickable prototype of the product in [user_story.md](user_story.md). It's plain HTML, CSS and JavaScript, with no build step and no network calls.
+SIKAD is a working, clickable prototype of the product in [user_story.md](prompts/prompt-1/user_story.md). It's plain HTML, CSS and JavaScript, with no build step and no network calls.
 
 **Run it:** open `index.html` in a browser. To serve it locally instead, run `python3 -m http.server` and visit http://localhost:8000.
 
@@ -20,7 +20,7 @@ SIKAD is a working, clickable prototype of the product in [user_story.md](user_s
    - stress gets a neutral reply that points to your schedule
    - vague input gets a clarifying question
    - a recurring org meeting is added to your weekly baseline
-7. **Profile → View engine output** shows the Phase 1/2/3 JSON from [prompt.md](prompt.md) for every request.
+7. **Profile → View engine output** shows the Phase 1/2/3 JSON from [prompt.md](prompts/prompt-1/prompt.md) for every request.
 
 ## How it maps to the spec
 
@@ -44,7 +44,7 @@ Rules the engine enforces:
 
 ## Design
 
-The visual system follows [design.md](design.md) (rationale in [design-audit.md](design-audit.md)): Forest/Paper/Butter palette with verified-contrast tokens in `css/styles.css`, Plus Jakarta Sans + Inter self-hosted in `fonts/` (SIL OFL 1.1), and the "Grounded Path" timeline.
+The visual system follows [design.md](prompts/prompt-2/design.md) (rationale in [design-audit.md](prompts/prompt-2/design-audit.md)): Forest/Paper/Butter palette with verified-contrast tokens in `css/styles.css`, Plus Jakarta Sans + Inter self-hosted in `fonts/` (latin + latin-ext subsets, SIL OFL 1.1), and the "Grounded Path" timeline.
 
 ## Demo-build limitations
 - **No LLM is called.** `parser.js` is a deterministic, rule-based stand-in that returns the same JSON contracts. To use a real model, call it with `prompt.md` as the system prompt from inside `TempoParser.parse`, and keep `engine.js` as the deterministic validator described in prompt.md §2.

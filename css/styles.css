@@ -1,6 +1,25 @@
-/* SIKAD — mobile-first styles. Tokens follow design.md §4–§6 (light + verified dark). */
-@font-face { font-family: "Inter"; src: url("../fonts/Inter-Variable.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
-@font-face { font-family: "Plus Jakarta Sans"; src: url("../fonts/PlusJakartaSans-Variable.woff2") format("woff2"); font-weight: 200 800; font-display: swap; }
+/* SIKAD — mobile-first styles. Tokens follow design.md §4–§6 (light + verified dark).
+ *
+ * Design-system export (prompts/prompt-3/sikad-design-system.css) reconciliation:
+ * the export is a Tailwind v4/shadcn dev-server build. Its SIKAD colour tokens were
+ * converted from oklch() and match the values below exactly, so they are mapped here,
+ * not duplicated:
+ *   --background→--bg  --foreground→--ink  --card→--surface  --muted/--secondary→--surface-2
+ *   --muted-foreground→--ink-3  --border→--line  --input→--line-strong  --primary→--forest
+ *   --butter-foreground→--on-butter  --harbor-tint→--sky-tint  --warning(-tint)→--warn(-tint)
+ *   --destructive→--critical  --focus→--focus-bg  --focus-foreground→--focus-ink  .dark→[data-theme="dark"]
+ * Tailwind utilities, @property registrations, Vite HMR code and /node_modules/ font URLs
+ * are intentionally not carried over (no Tailwind or bundler in this project).
+ */
+/* Fonts are self-hosted from /fonts (SIL OFL 1.1): latin + latin-ext subsets, matching the export. */
+@font-face { font-family: "Inter"; src: url("../fonts/Inter-Variable.woff2") format("woff2"); font-weight: 100 900; font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Inter"; src: url("../fonts/Inter-Variable-LatinExt.woff2") format("woff2"); font-weight: 100 900; font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Plus Jakarta Sans"; src: url("../fonts/PlusJakartaSans-Variable.woff2") format("woff2"); font-weight: 200 800; font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Plus Jakarta Sans"; src: url("../fonts/PlusJakartaSans-Variable-LatinExt.woff2") format("woff2"); font-weight: 200 800; font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 
 :root {
   /* surfaces */
@@ -59,6 +78,7 @@
 
   /* space, shape, depth */
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px; --space-7: 32px; --space-8: 40px;
+  --target: 44px;            /* minimum touch target (export: min-h-11) */
   --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-xl: 24px; --radius-pill: 999px;
   --shadow-1: 0 1px 2px rgb(38 51 45 / .06);
   --shadow-2: 0 8px 24px rgb(38 51 45 / .10);
@@ -108,7 +128,9 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; }
-html { scroll-padding-top: 64px; scroll-padding-bottom: 104px; }
+html { scroll-padding-top: 64px; scroll-padding-bottom: 104px; scroll-behavior: smooth; }
+::selection { background: var(--butter); color: var(--on-butter); }
+button, a, input, select, textarea, summary { -webkit-tap-highlight-color: transparent; }
 body {
   background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 22px;
   -webkit-font-smoothing: antialiased; overflow-x: hidden;
@@ -152,7 +174,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .btn.primary:disabled { background: var(--surface-2); color: var(--ink-disabled); border-color: var(--line); }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--forest); }
 .btn.ghost:hover { background: var(--surface-2); }
-.btn.small { padding: 6px 14px; min-height: 36px; font-size: 13px; }
+.btn.small { padding: 6px 14px; min-height: var(--target); font-size: 13px; }
 .btn.block { width: 100%; margin: 8px 0; }
 .btn.danger { color: var(--critical); }
 .btn.connected { background: var(--success-tint); color: var(--success); border-color: var(--success); }
@@ -203,7 +225,7 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
 .tag, .demo-tag { display: inline-block; font-family: var(--font-mono); font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: .04em; padding: 1px 6px; border-radius: 4px; background: var(--surface-2); color: var(--ink-2); border: 1px dashed var(--line-strong); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .chip-btn {
-  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); border-radius: var(--radius-pill); padding: 8px 14px; min-height: 40px;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); border-radius: var(--radius-pill); padding: 8px 14px; min-height: var(--target);
   cursor: pointer; font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; gap: 6px;
 }
 .chip-btn:hover { background: var(--surface-2); }
@@ -275,7 +297,7 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
   display: grid; grid-template-columns: 18px 76px 1fr 92px 44px; grid-template-areas: "lock title title mode del" "lock day time time time"; gap: 6px; align-items: center;
   background: var(--sky-tint); border: 1px solid var(--line); border-left: 4px solid var(--harbor); border-radius: var(--radius-md); padding: 8px 4px 8px 8px;
 }
-.class-row input, .class-row select { min-height: 40px; padding: 6px 8px; font-size: 15px; }
+.class-row input, .class-row select { min-height: var(--target); padding: 6px 8px; font-size: 15px; }
 .cr-lock { grid-area: lock; color: var(--harbor); display: inline-flex; align-self: start; padding-top: 10px; }
 .cr-lock svg { width: 16px; height: 16px; }
 .cr-title { grid-area: title; font-weight: 700; }
@@ -379,9 +401,9 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
   background: var(--surface-2); border-bottom: 1px dashed var(--line-strong); overflow-x: auto; scrollbar-width: none;
 }
 .clock-bar::-webkit-scrollbar { display: none; }
-.clock-now { flex: 1; min-width: 0; min-height: 36px; text-align: left; background: var(--surface); border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); padding: 6px 10px; cursor: pointer; font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.clock-now { flex: 1; min-width: 0; min-height: var(--target); text-align: left; background: var(--surface); border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); padding: 6px 10px; cursor: pointer; font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .clock-now b { color: var(--ink); }
-.clock-step { flex: none; min-height: 36px; border: 1px dashed var(--line-strong); background: var(--surface); color: var(--ink); border-radius: var(--radius-sm); padding: 6px 9px; font-size: 12px; font-weight: 600; cursor: pointer; }
+.clock-step { flex: none; min-height: var(--target); border: 1px dashed var(--line-strong); background: var(--surface); color: var(--ink); border-radius: var(--radius-sm); padding: 6px 9px; font-size: 12px; font-weight: 600; cursor: pointer; }
 .clock-step:hover, .clock-now:hover { background: var(--bg); }
 .home-head { padding: 20px 0 8px; position: relative; }
 .home-head .theme-toggle { position: absolute; top: 16px; right: 0; }
@@ -399,8 +421,8 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
 .card h3 { margin: 16px 0 6px; font-size: 14px; color: var(--ink-2); }
 .section { margin: 24px 0; }
 .section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; }
-.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 3px; }
-.seg button { border: 0; background: none; padding: 6px 12px; min-height: 36px; border-radius: var(--radius-pill); font-weight: 600; font-size: 13px; cursor: pointer; color: var(--ink-2); }
+.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 0; }
+.seg button { border: 0; background: none; padding: 6px 14px; min-height: var(--target); border-radius: var(--radius-pill); font-weight: 600; font-size: 13px; cursor: pointer; color: var(--ink-2); }
 .seg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1); outline: 1px solid var(--line-strong); }
 
 /* Focus Card — the most prominent element (§7.3) */
@@ -622,7 +644,8 @@ button.tl-card:hover { border-color: var(--line-strong); }
 }
 .sheet h2 { font-size: 20px; line-height: 26px; margin: 8px 44px 4px 0; display: flex; align-items: center; gap: 8px; }
 .sheet h2 > svg { color: var(--harbor); width: 20px; height: 20px; }
-.sheet h2:focus { outline: none; }
+.sheet h2:focus, h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
+h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .sheet h2:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .sheet-grip { width: 40px; height: 4px; border-radius: 4px; background: var(--line); margin: 0 auto 6px; }
 .sheet-close { position: absolute; right: 10px; top: 12px; }
@@ -634,19 +657,19 @@ button.tl-card:hover { border-color: var(--line-strong); }
 .sheet .status-panel p { margin: 0; }
 .part-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; margin: 4px 0; }
 .part-row .toggle { margin: 0; }
-.tabs { display: flex; gap: 4px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 3px; margin: 12px 0 4px; }
-.tabs button { flex: 1; border: 0; background: none; padding: 8px; min-height: 40px; border-radius: var(--radius-pill); font-weight: 600; cursor: pointer; color: var(--ink-2); }
+.tabs { display: flex; gap: 4px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-pill); padding: 2px; margin: 12px 0 4px; }
+.tabs button { flex: 1; border: 0; background: none; padding: 8px; min-height: var(--target); border-radius: var(--radius-pill); font-weight: 600; cursor: pointer; color: var(--ink-2); }
 .tabs button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1); outline: 1px solid var(--line-strong); }
 .sheet textarea#dump-text { margin: 0 0 4px; }
 .sheet-sub { color: var(--ink-2); font-size: 14px; line-height: 20px; margin: 4px 0 0; }
 .title-icon { display: inline-flex; color: var(--forest); }
 .scenarios { margin-top: 16px; padding: 10px 12px; background: var(--surface-2); border: 1px dashed var(--line-strong); border-radius: var(--radius-md); }
-.scenarios summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-2); display: flex; align-items: center; gap: 8px; min-height: 32px; }
-.scenarios .chip-btn { font-size: 13px; padding: 6px 12px; min-height: 36px; }
+.scenarios summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-2); display: flex; align-items: center; gap: 8px; min-height: var(--target); }
+.scenarios .chip-btn { font-size: 13px; padding: 6px 12px; min-height: var(--target); }
 .sessions { margin: 10px 0; }
 .wrap { flex-wrap: wrap; }
 details.log { border: 1px dashed var(--line-strong); border-radius: var(--radius-md); background: var(--surface); padding: 8px 12px; margin: 8px 0; }
-details.log summary { cursor: pointer; min-height: 32px; }
+details.log summary { cursor: pointer; min-height: var(--target); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 details.log p { color: var(--ink-2); }
 details.log pre { overflow-x: auto; font-family: var(--font-mono); font-size: 12px; line-height: 18px; background: var(--surface-2); color: var(--ink); padding: 10px; border-radius: var(--radius-sm); max-height: 360px; }
 @keyframes rise { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
@@ -659,11 +682,14 @@ details.log pre { overflow-x: auto; font-family: var(--font-mono); font-size: 12
   display: flex; gap: 12px; align-items: center; animation: toastIn .2s ease-out;
 }
 @keyframes toastIn { from { transform: translate(-50%, 20px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-.toast button { background: none; border: 0; color: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; display: inline-flex; align-items: center; gap: 4px; min-height: 32px; }
+.toast button { background: none; border: 0; color: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; display: inline-flex; align-items: center; gap: 4px; min-height: var(--target); padding: 0 4px; }
 .toast button svg { width: 16px; height: 16px; }
 .toast:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
 
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 body.sheet-open .toast { display: none; }
 @media (max-width: 359px) {
   .clock-bar .demo-tag { display: none; }   /* bar stays dashed + labelled "Demo clock (demo only)" */

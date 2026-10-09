@@ -105,6 +105,12 @@
     return el.value;
   }
 
+  /** After a step change, put keyboard/screen-reader focus on the new step's heading. */
+  function focusHeading() {
+    const h = document.querySelector('.ob-title, main h1');
+    if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
+  }
+
   /** Move focus to the first question that needs the student's answer (design.md §12.6). */
   function focusFirstQuestion() {
     const q = document.querySelector('[data-question]');
@@ -137,12 +143,21 @@
     if (!b) return null;
     return `[data-action="${b.dataset.action}"]` + (b.dataset.id ? `[data-id="${b.dataset.id}"]` : '') + (b.dataset.tab ? `[data-tab="${b.dataset.tab}"]` : '');
   };
+  /** Selector that finds "the same" control after innerHTML is rebuilt, so keyboard focus isn't dropped to <body>. */
+  const FOCUS_KEYS = ['action', 'id', 'tab', 'n', 'v', 'i', 'k', 'path', 'value', 'day', 'scope', 'bind', 'setting', 'mins', 'ms'];
+  const focusKey = (el) => {
+    if (!el || el === document.body || !el.closest) return null;
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const parts = FOCUS_KEYS.filter((k) => el.dataset && el.dataset[k] !== undefined).map((k) => `[data-${k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())}="${CSS.escape(el.dataset[k])}"]`);
+    return parts.length ? el.tagName.toLowerCase() + parts.join('') : null;
+  };
 
   function render() {
     state.obDraft = state.onboarded ? null : ui.ob;
     S.save(state);
     const opening = !!ui.sheet && !sheetWasOpen;
     if (opening) sheetOpener = describe(document.activeElement);
+    const keep = !opening && !(sheetWasOpen && !ui.sheet) ? focusKey(document.activeElement) : null;
     $app.innerHTML = state.onboarded ? shell() : onboarding();
     $sheet.innerHTML = ui.sheet ? sheet() : '';
     document.body.classList.toggle('sheet-open', !!ui.sheet);
@@ -154,6 +169,10 @@
       const back = sheetOpener && $app.querySelector(sheetOpener);
       if (back) back.focus({ preventScroll: true });
       sheetOpener = null;
+    } else if (keep) {
+      // Same control if it still exists; otherwise the Focus Card title or the view heading.
+      const again = document.querySelector(keep) || document.querySelector(ui.sheet ? '#sheet-title' : '#focus-title, main h1, .ob-title');
+      if (again && again !== document.activeElement) again.focus({ preventScroll: true });
     }
     sheetWasOpen = !!ui.sheet;
     renderToast();
@@ -466,9 +485,9 @@
       <section class="section">
         <div class="section-head">
           <h2>${ui.dayView === 'today' ? "Today's timeline" : "Tomorrow's preview"}</h2>
-          <div class="seg" role="tablist">
-            <button class="${ui.dayView === 'today' ? 'on' : ''}" data-action="dayView" data-v="today">Today</button>
-            <button class="${ui.dayView === 'tomorrow' ? 'on' : ''}" data-action="dayView" data-v="tomorrow">Tomorrow</button>
+          <div class="seg" role="tablist" aria-label="Day to show">
+            <button role="tab" aria-selected="${ui.dayView === 'today'}" class="${ui.dayView === 'today' ? 'on' : ''}" data-action="dayView" data-v="today">Today</button>
+            <button role="tab" aria-selected="${ui.dayView === 'tomorrow'}" class="${ui.dayView === 'tomorrow' ? 'on' : ''}" data-action="dayView" data-v="tomorrow">Tomorrow</button>
           </div>
         </div>
         ${timeline(T.dayStart(now()) + (ui.dayView === 'tomorrow' ? T.DAY : 0))}
@@ -532,7 +551,7 @@
     if (!next) {
       const stuck = pendingTasks.length > 0;
       return `<section class="focus empty" aria-labelledby="focus-title"><div class="focus-label">${ICON.step}<span>What to do next</span></div>
-        <h2 id="focus-title">${stuck ? 'Nothing fits right now' : "You're all clear."}</h2>
+        <h2 id="focus-title" tabindex="-1">${stuck ? 'Nothing fits right now' : "You're all clear."}</h2>
         <p>${stuck ? 'Some tasks need a deadline or more time. <a class="link on-dark-link" href="#attention">See what needs attention</a>.' : 'No pending tasks. Tap Brain dump when something new comes up.'}</p></section>`;
     }
     const task = taskById(next.taskId);
@@ -548,7 +567,7 @@
       <section class="focus ${active ? 'active' : ''}" aria-labelledby="focus-title">
         <div class="focus-label">${active ? '<span class="live-dot" aria-hidden="true"></span><span>In progress</span>' : `${ICON.step}<span>What to do next</span>`}</div>
         ${nowFixed && !active ? `<div class="focus-now">${ICON.lock}<span>Right now: ${esc(nowFixed.title)} until <span class="num">${T.timeShort(nowFixed.end)}</span></span></div>` : ''}
-        <h2 id="focus-title">${!active && startsNow && !STARTS_WITH_VERB.test(main) ? 'Start ' : ''}${esc(main)}</h2>
+        <h2 id="focus-title" tabindex="-1">${!active && startsNow && !STARTS_WITH_VERB.test(main) ? 'Start ' : ''}${esc(main)}</h2>
         ${part ? `<div class="focus-part">— ${esc(part)}</div>` : ''}
         <div class="focus-time num">${ICON.clock}<span><span class="nowrap">${T.rel(next.start, n)} · ${T.range(next.start, next.end)}</span> · <span class="nowrap">${durLabel}</span></span></div>
         <div class="focus-tags">${task && task.context ? `<span class="chip">${esc(task.context)}</span>` : ''}${task ? priChip(task.priority) : ''}${sessionTag}${longTag}${task && task.isAiEstimate ? estChip() : ''}</div>
@@ -653,7 +672,7 @@
     const nextId = (state.active && state.active.sessionId) || (E.nextSession(state.plan, n) || {}).id;
     const isToday = dayMs === T.dayStart(n);
     let nowPlaced = !isToday;
-    const nowLine = `<div class="tl-now" role="presentation"><span class="num">Now · ${T.time(n)}</span></div>`;
+    const nowLine = `<li class="tl-now"><span class="num">Now · ${T.time(n)}</span></li>`;
     const rows = [];
     for (const it of items) {
       if (!nowPlaced && it.start > n) { rows.push(nowLine); nowPlaced = true; }
@@ -1252,7 +1271,7 @@
         <details class="log" ${i === 0 ? 'open' : ''}>
           <summary><b>${esc(e.phase)}</b> <span class="muted small">· ${T.short(e.at)} ${T.time(e.at)}</span>${e.output.status ? ` <span class="chip status-${e.output.status}">${e.output.status}</span>` : ''}</summary>
           <p class="small muted">Input: ${esc(String(e.input).slice(0, 220))}</p>
-          <pre>${esc(JSON.stringify(e.output, null, 2))}</pre>
+          <pre tabindex="0" aria-label="${esc(e.phase)} JSON output">${esc(JSON.stringify(e.output, null, 2))}</pre>
         </details>`).join('') || '<p class="muted">Nothing yet.</p>'}`;
   }
 
@@ -1278,8 +1297,9 @@
       ob.step++;
       render();
       window.scrollTo(0, 0);
+      focusHeading();
     },
-    obBack() { ui.ob.step = Math.max(0, ui.ob.step - 1); render(); },
+    obBack() { ui.ob.step = Math.max(0, ui.ob.step - 1); render(); focusHeading(); },
     obSet(ds) {
       const v = ds.value;
       const [obj, key] = ds.path.split('.');
@@ -1636,7 +1656,9 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' && ui.sheet) {
-      const f = [...$sheet.querySelectorAll('button:not([disabled]), input, select, textarea, summary, [tabindex="0"]')].filter((x) => x.offsetParent !== null);
+      // checkVisibility() also excludes content of closed <details> (offsetParent alone does not).
+      const visible = (x) => (x.checkVisibility ? x.checkVisibility() : x.offsetParent !== null);
+      const f = [...$sheet.querySelectorAll('button:not([disabled]), input:not([disabled]), select, textarea, summary, [tabindex="0"]')].filter(visible);
       if (f.length) {
         const first = f[0], last = f[f.length - 1];
         if (e.shiftKey && (document.activeElement === first || !$sheet.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
