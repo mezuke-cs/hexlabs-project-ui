@@ -65,9 +65,29 @@
     snooze: '<svg viewBox="0 0 24 24"><path d="M5 12h12M13 7l5 5-5 5"/></svg>',
     braindump: '<svg viewBox="0 0 24 24"><path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 16h-8l-4.5 4v-4H5a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 5 5z"/><path d="M8 9h8M8 12.5h5"/></svg>',
     chevron: '<svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>',
+    sun: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></svg>',
+    moon: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
   };
   // SIKAD mark: a short path with the next step ahead of it (design.md §10).
   const LOGO = '<svg class="logo" viewBox="0 0 48 48" aria-hidden="true"><path class="logo-path" d="M6 41c10 0 11-9 17-13s10-3 12-7"/><circle class="logo-step" cx="10.5" cy="40.4" r="2.6"/><circle class="logo-step" cx="22" cy="29" r="2.6"/><circle class="logo-next" cx="38.5" cy="13.5" r="5.5"/></svg>';
+
+  // ------------------------------------------------------------- theme --
+  // Light/dark toggle. The choice is a per-device convenience kept in localStorage;
+  // with no saved choice the app follows the OS setting (design.md §5.2).
+  const THEME_KEY = 'sikad-theme';
+  const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  const currentTheme = () => document.documentElement.dataset.theme || (darkQuery && darkQuery.matches ? 'dark' : 'light');
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#131917' : '#294B3A');
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* storage unavailable: still applies for this session */ }
+  }
+  function themeToggle() {
+    const dark = currentTheme() === 'dark';
+    return `<button class="theme-toggle" data-action="toggleTheme" aria-pressed="${dark}" aria-label="Dark mode" title="${dark ? 'Switch to light mode' : 'Switch to dark mode'}">
+      ${dark ? ICON.sun : ICON.moon}<span>${dark ? 'Light' : 'Dark'}</span></button>`;
+  }
 
   function setPath(obj, path, value) {
     const keys = path.split('.');
@@ -157,7 +177,7 @@
     const progress = ob.step > 0 && ob.step < 5
       ? `<div class="ob-progress"><div class="ob-bars" aria-hidden="true">${[1, 2, 3, 4].map((i) => `<span class="${i <= ob.step ? 'on' : ''}"></span>`).join('')}</div><span class="ob-step">Step ${ob.step} of 4</span></div>` : '';
     const body = [obWelcome, obBaseline, obLifestyle, obSync, obDump, obGenerating][ob.step]();
-    return `<div class="screen onboarding" data-step="${esc(steps[ob.step])}">${progress}${body}</div>`;
+    return `<div class="screen onboarding" data-step="${esc(steps[ob.step])}"><div class="ob-top">${themeToggle()}</div>${progress}${body}</div>`;
   }
 
   function obWelcome() {
@@ -429,12 +449,12 @@
   // ------------------------------------------------------------------ HOME --
   function homeView() {
     if (ui.focusOnly) {
-      return `<header class="home-head"><div class="eyebrow">${T.date(now())}</div><h1>One thing at a time</h1></header>
+      return `<header class="home-head">${themeToggle()}<div class="eyebrow">${T.date(now())}</div><h1>One thing at a time</h1></header>
         ${focusCard()}
         <button class="btn ghost block" data-action="showFullPlan">Show my full plan</button>`;
     }
     return `
-      <header class="home-head">
+      <header class="home-head">${themeToggle()}
         <div class="eyebrow">${T.date(now())}</div>
         <h1>Hey, ${esc(state.user.name || 'there')}</h1>
       </header>
@@ -717,7 +737,7 @@
     const pct = cap.free ? Math.min(100, Math.round((cap.required / cap.free) * 100)) : 100;
     const compact = (m) => (m ? `${Math.round((m / 60) * 10) / 10}h` : '—');
     return `
-      <header class="home-head"><div class="eyebrow">Next 7 days</div><h1>Overview</h1></header>
+      <header class="home-head">${themeToggle()}<div class="eyebrow">Next 7 days</div><h1>Overview</h1></header>
       <section class="card fit" aria-labelledby="cap-title">
         <div class="fit-head"><h2 id="cap-title">Available vs. required</h2><span class="fit-verdict ${over ? 'bad' : 'good'}">${over ? `${ICON.alert}Over capacity` : `${ICON.check}Fits`}</span></div>
         <div class="bar ${over ? 'over' : ''}" role="img" aria-label="${T.dur(cap.required)} of tasks against ${approx(cap.free)} of usable time"><span style="width:${pct}%"></span></div>
@@ -746,7 +766,7 @@
     const upcoming = open.filter((t) => !attention.includes(t)).sort((a, b) => a.deadline - b.deadline);
     const done = state.tasks.filter((t) => t.status === 'done');
     return `
-      <header class="home-head"><div class="eyebrow">${open.length} open · ${done.length} done</div><h1>Tasks</h1></header>
+      <header class="home-head">${themeToggle()}<div class="eyebrow">${open.length} open · ${done.length} done</div><h1>Tasks</h1></header>
       <button class="btn block" data-action="newTask">${ICON.plus} Add a task manually</button>
       ${attention.length ? `<h2 class="list-h">Needs attention</h2>${attention.map(taskCard).join('')}` : ''}
       ${upcoming.length ? `<h2 class="list-h">Up next</h2>${upcoming.map(taskCard).join('')}` : ''}
@@ -789,7 +809,7 @@
     const classes = b.classes.slice().sort((a, c) => ((a.day + 6) % 7) - ((c.day + 6) % 7) || T.hmToMins(a.start) - T.hmToMins(c.start));
     const upcomingEvents = state.events.filter((e) => e.end > now()).sort((a, c) => a.start - c.start);
     return `
-      <header class="home-head"><div class="eyebrow">Profile & settings</div><h1>${esc(state.user.name || 'You')}</h1></header>
+      <header class="home-head">${themeToggle()}<div class="eyebrow">Profile & settings</div><h1>${esc(state.user.name || 'You')}</h1></header>
       <section class="card settings">
         <h2>Your day</h2>
         <div class="grid2">
@@ -1339,6 +1359,12 @@
     showFullPlan() { ui.focusOnly = false; render(); },
     focusOnly() { ui.sheet = null; ui.tab = 'home'; ui.focusOnly = true; render(); window.scrollTo(0, 0); },
     dismissUpdate() { state.lastUpdate = null; render(); },
+    toggleTheme() {
+      applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+      render();
+      const btn = document.querySelector('.theme-toggle');
+      if (btn) btn.focus({ preventScroll: true });
+    },
     dismissError() { ui.error = null; render(); },
     retryError() { const sh = ui.error && ui.error.retrySheet; ui.error = null; ui.sheet = sh; render(); },
     undo() {
@@ -1620,6 +1646,9 @@
     if (e.key === 'Escape' && ui.sheet) A.closeSheet();
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && ui.sheet && ui.sheet.type === 'dump' && ui.sheet.mode === 'input') A.processDump();
   });
+
+  // Keep the toggle's icon in sync when following the OS setting and it changes.
+  if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', () => { if (!document.documentElement.dataset.theme) render(); });
 
   render();
 })();

@@ -383,7 +383,17 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
 .clock-now b { color: var(--ink); }
 .clock-step { flex: none; min-height: 36px; border: 1px dashed var(--line-strong); background: var(--surface); color: var(--ink); border-radius: var(--radius-sm); padding: 6px 9px; font-size: 12px; font-weight: 600; cursor: pointer; }
 .clock-step:hover, .clock-now:hover { background: var(--bg); }
-.home-head { padding: 20px 0 8px; }
+.home-head { padding: 20px 0 8px; position: relative; }
+.home-head .theme-toggle { position: absolute; top: 16px; right: 0; }
+.home-head > .eyebrow, .home-head > h1 { padding-right: 96px; }
+/* Light/dark toggle */
+.theme-toggle {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 6px 12px; border-radius: var(--radius-pill);
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.theme-toggle:hover { background: var(--surface-2); }
+.theme-toggle svg { width: 18px; height: 18px; }
+.ob-top { display: flex; justify-content: flex-end; margin: -12px 0 12px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px; margin: 12px 0; }
 .card h2 { margin-bottom: 8px; }
 .card h3 { margin: 16px 0 6px; font-size: 14px; color: var(--ink-2); }
