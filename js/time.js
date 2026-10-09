@@ -1,5 +1,5 @@
 /*
- * Tempo — wall-clock time helpers.
+ * SIKAD — wall-clock time helpers.
  *
  * All times are stored as "wall-clock milliseconds": a UTC timestamp whose UTC
  * fields equal the student's local wall time (Asia/Manila, +08:00). This keeps

@@ -1,5 +1,5 @@
 /*
- * Tempo — input understanding (UNDERSTAND stage).
+ * SIKAD — input understanding (UNDERSTAND stage).
  *
  * A deterministic stand-in for the LLM described in prompt.md. It turns messy
  * brain-dump text into structured "intents" and emits the Phase 1 / Phase 2

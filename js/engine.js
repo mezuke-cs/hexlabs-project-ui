@@ -1,5 +1,5 @@
 /*
- * Tempo — adaptive scheduling engine.
+ * SIKAD — adaptive scheduling engine.
  *
  * PRIORITIZE → BREAK DOWN → SCHEDULE → NEXT ACTION → REPLAN (user_story.md §5).
  * Deterministic and stateless: every call receives the full state and returns

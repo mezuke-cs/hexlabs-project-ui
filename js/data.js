@@ -1,5 +1,5 @@
 /*
- * Tempo — demo data. Mirrors the "Alex" walkthrough in user_story.md §20.
+ * SIKAD — demo data. Mirrors the "Alex" walkthrough in user_story.md §20.
  */
 (function (root) {
   'use strict';

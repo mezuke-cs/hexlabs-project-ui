@@ -1,5 +1,5 @@
 /*
- * Tempo — application state and state transitions.
+ * SIKAD — application state and state transitions.
  *
  * This is the "Application Responsibility" side of prompt.md §2: it owns
  * persistence, applies the engine's proposals, keeps fixed commitments
