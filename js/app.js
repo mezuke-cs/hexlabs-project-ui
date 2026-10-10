@@ -5,7 +5,7 @@
 (function () {
   'use strict';
   const T = window.TempoTime, E = window.TempoEngine, P = window.TempoParser, S = window.TempoStore, D = window.TempoData;
-  const F = window.TempoFocus, Assistant = window.TempoAssistant;
+  const F = window.TempoFocus, Assistant = window.TempoAssistant, M = window.TempoMotion;
 
   let state = S.load();
   let undoSnap = null;
@@ -14,6 +14,7 @@
     askThread: [],      // answered questions shown in the Ask SIKAD panel (this visit only)
     dict: null,         // dictaphone state: { path, state, final, interim, note, error }
     focusPick: null,    // session id while the student is choosing a working method
+    spotlightOff: false, // the student un-dimmed the screen during Focus Mode; the session keeps running
     ob: state.obDraft || freshOnboarding(),
   };
 
@@ -79,6 +80,7 @@
   // Light/dark toggle. The choice is a per-device convenience kept in localStorage;
   // with no saved choice the app follows the OS setting (design.md §5.2).
   const THEME_KEY = 'sikad-theme';
+  let themeFade = 0;
   const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   const currentTheme = () => document.documentElement.dataset.theme || (darkQuery && darkQuery.matches ? 'dark' : 'light');
   function applyTheme(theme) {
@@ -187,16 +189,71 @@
     if (h && state.onboarded) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
   });
 
+  // ---------------------------------------------------------- motion --
+  // motion-spec.md: state changes first, then the view animates from where it was to where it is.
+  let lastViewKey = null, lastSheetKey = null;
+  const updateSig = () => { const u = state.lastUpdate; return u ? `${u.trigger}|${u.at}|${JSON.stringify(u.changes)}` : ''; };
+  let lastWashSig = updateSig();          // a plan update restored from storage is not news: no wash on load
+
+  /** Play an element's CSS exit, then remove it. */
+  function leave(el, cls, ms) {
+    if (M.reduced()) { el.remove(); return; }
+    el.classList.add(cls);
+    el.inert = true;
+    el.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+    const gone = () => el.remove();
+    el.addEventListener('animationend', (e) => { if (e.target === el) gone(); }, { once: true });
+    setTimeout(gone, ms + 80);
+  }
+
+  /**
+   * The Satisfaction (motion-spec §5.2). Call after the store has changed: the old view strikes
+   * the finished title, then the real state renders. Any other render in between wins.
+   */
+  let pending = null;
+  function settle(sessionId, after) {
+    const sel = `[data-sid="${CSS.escape(sessionId)}"]`;
+    const card = document.querySelector(`.focus${sel}`), row = document.querySelector(`.tl-item${sel}`);
+    const wait = M.strike([...(card ? card.querySelectorAll('.strike') : []), row && row.querySelector('.tl-name')]);
+    if (!wait) { render(); if (after) after(); return; }
+    S.save(state);
+    if (card) card.classList.add('is-completing');
+    if (row) row.classList.add('is-completing');
+    pending = { after, timer: setTimeout(render, wait) };
+  }
+
+  /** Focus Mode dims the rest of Home while a method is being picked or a session is open. */
+  function spotlightOn() {
+    if (!state.onboarded || ui.tab !== 'home' || ui.sheet || ui.spotlightOff) return false;
+    if (state.active) return state.plan.some((x) => x.id === state.active.sessionId);
+    const next = ui.focusPick && E.nextSession(state.plan, now());
+    return !!next && next.id === ui.focusPick;
+  }
+
   function render() {
+    const after = pending && pending.after;
+    if (pending) { clearTimeout(pending.timer); pending = null; }
     state.obDraft = state.onboarded ? null : ui.ob;
     S.save(state);
-    const opening = !!ui.sheet && !sheetWasOpen;
-    syncHistory(opening, !ui.sheet && sheetWasOpen);
+    const opening = !!ui.sheet && !sheetWasOpen, closing = !ui.sheet && sheetWasOpen;
+    syncHistory(opening, closing);
     if (opening) sheetOpener = describe(document.activeElement);
-    const keep = !opening && !(sheetWasOpen && !ui.sheet) ? focusKey(document.activeElement) : null;
+    const keep = !opening && !closing ? focusKey(document.activeElement) : null;
+    const viewKey = state.onboarded ? `app:${ui.tab}:${ui.focusOnly ? 'one' : 'all'}` : `ob:${ui.ob.step}`;
+    const sheetKey = ui.sheet ? `${ui.sheet.type}:${ui.sheet.mode || ''}` : null;
+    const snap = M.capture($app);
+    const oldSheet = $sheet.querySelector('.sheet-backdrop:not(.is-closing)');
+    const sheetScroll = oldSheet && sheetKey === lastSheetKey ? oldSheet.firstElementChild.scrollTop : 0;
     $app.innerHTML = state.onboarded ? shell() : onboarding();
-    $sheet.innerHTML = ui.sheet ? sheet() : '';
+    if (closing && oldSheet && !M.reduced()) leave(oldSheet, 'is-closing', 160);
+    else $sheet.innerHTML = ui.sheet ? sheet() : '';
+    if (ui.sheet) {
+      if (opening) $sheet.firstElementChild.classList.add('is-opening');
+      else if (sheetScroll) $sheet.firstElementChild.firstElementChild.scrollTop = sheetScroll;   // re-rendering a sheet keeps your place
+    }
+    lastSheetKey = sheetKey;
     document.body.classList.toggle('sheet-open', !!ui.sheet);
+    document.body.classList.toggle('spotlight', spotlightOn());
     $app.toggleAttribute('inert', !!ui.sheet);
     if (opening) {
       const target = $sheet.querySelector('#dump-text') || $sheet.querySelector('#sheet-title');
@@ -211,13 +268,22 @@
       if (again && again !== document.activeElement) again.focus({ preventScroll: true });
     }
     sheetWasOpen = !!ui.sheet;
+    const sig = updateSig();
+    M.play($app, snap, { sameView: viewKey === lastViewKey, viewEl: $app.querySelector('main, .onboarding'), washNew: !!sig && sig !== lastWashSig });
+    lastViewKey = viewKey; lastWashSig = sig;
     if (state.onboarded) ui.prevPct = S.weeklyProgress(state).percent;
     ui.celebrate = false;
     renderToast();
     tickTimer();
+    if (after) after();
   }
+  /** The toast is one node for its whole life, so unrelated renders don't replay its entrance. */
   function renderToast() {
-    $toast.innerHTML = ui.toast ? `<div class="toast" role="status"><span>${esc(ui.toast.msg)}</span>${ui.toast.undo && undoSnap ? ` <button data-action="undo">${ICON.undo}Undo</button>` : ''}</div>` : '';
+    const cur = $toast.querySelector('.toast:not(.is-leaving)');
+    if (!ui.toast) { if (cur) leave(cur, 'is-leaving', M.DUR.micro); return; }
+    const undo = !!(ui.toast.undo && undoSnap);
+    if (cur && cur.dataset.id === String(ui.toast.id) && !!cur.querySelector('button') === undo) return;
+    $toast.innerHTML = `<div class="toast" role="status" data-id="${ui.toast.id}"><span>${esc(ui.toast.msg)}</span>${undo ? ` <button data-action="undo">${ICON.undo}Undo</button>` : ''}</div>`;
   }
   function tickDictation() {
     const el = document.getElementById('dict-time');
@@ -461,7 +527,7 @@
         ${LOGO}
         <h1 class="ob-title">Building your plan</h1>
         <ol class="gen-steps">${steps.map((st, i) => `<li class="${i < ui.ob.genStep ? 'done' : i === ui.ob.genStep ? 'doing' : ''}">
-          <span class="gen-mark" aria-hidden="true">${i < ui.ob.genStep ? ICON.check : i === ui.ob.genStep ? '<span class="spinner"></span>' : ''}</span>
+          <span class="gen-mark" aria-hidden="true">${i < ui.ob.genStep ? ICON.check : i === ui.ob.genStep ? '<span class="gen-dot"></span>' : ''}</span>
           <span>${st}</span><span class="sr-only">${i < ui.ob.genStep ? '(done)' : i === ui.ob.genStep ? '(in progress)' : ''}</span></li>`).join('')}</ol>
         <p class="sr-only" aria-live="polite">${esc(steps[cur])}</p>
       </div>`;
@@ -601,7 +667,7 @@
     if (ui.focusOnly) {
       return `<header class="home-head">${themeToggle()}<div class="eyebrow">${T.date(now())}</div><h1>One thing at a time</h1></header>
         ${focusCard()}
-        <button class="btn ghost block" data-action="showFullPlan">Show my full plan</button>`;
+        <button class="btn ghost block" data-action="showFullPlan" data-flip="full-plan">Show my full plan</button>`;
     }
     return `
       <header class="home-head">${themeToggle()}
@@ -615,7 +681,7 @@
       ${weekCard()}
       ${fitCard()}
       <section class="section">
-        <div class="section-head">
+        <div class="section-head" data-flip="tl-head">
           <h2>${ui.dayView === 'today' ? "Today's timeline" : "Tomorrow's preview"}</h2>
           <div class="seg" role="tablist" aria-label="Day to show">
             <button role="tab" aria-selected="${ui.dayView === 'today'}" class="${ui.dayView === 'today' ? 'on' : ''}" data-action="dayView" data-v="today">Today</button>
@@ -648,7 +714,7 @@
     const short = u.status === 'INFEASIBLE';
     const skipped = /cancel|skip/i.test(u.trigger + ' ' + u.notes.join(' '));
     return `
-      <section class="status-card ${short ? 's-neutral' : 's-success'} update" role="status" aria-labelledby="upd-title">
+      <section class="status-card ${short ? 's-neutral' : 's-success'} update" role="status" aria-labelledby="upd-title" data-flip="upd" data-flip-exit>
         <div class="sc-head">${ICON.check}<h2 id="upd-title">Plan updated</h2><button class="icon-btn" data-action="dismissUpdate" aria-label="Dismiss plan update">${ICON.close}</button></div>
         <p class="small">Because: ${esc(u.trigger)}</p>
         ${u.notes.map((x) => `<p class="small">${esc(x)}</p>`).join('')}
@@ -665,7 +731,7 @@
     return state.checkins.slice(-2).map((c) => {
       const moved = state.plan.find((x) => x.unitId === c.unitId);
       return `
-        <section class="status-card s-clarify checkin" aria-labelledby="ci-${esc(c.id)}">
+        <section class="status-card s-clarify checkin" aria-labelledby="ci-${esc(c.id)}" data-flip="ci:${esc(c.id)}" data-flip-exit>
           <div class="sc-head">${ICON.undo}<h2 id="ci-${esc(c.id)}">Did you finish ${esc(c.title)}?</h2></div>
           <p class="num">It was planned for ${T.rel(c.start, now()).toLowerCase()}, ${T.range(c.start, c.end)}.</p>
           <p>${moved ? `In case you didn't, it's already moved to <b class="num">${T.rel(moved.start, now())} ${T.timeShort(moved.start)}</b>.` : "In case you didn't, it's back in your queue."}</p>
@@ -684,7 +750,7 @@
     const pendingTasks = state.tasks.filter((t) => t.status === 'pending' || t.status === 'in_progress');
     if (!next) {
       const stuck = pendingTasks.length > 0;
-      return `<section class="focus empty" aria-labelledby="focus-title"><div class="focus-label">${ICON.step}<span>What to do next</span></div>
+      return `<section class="focus empty" aria-labelledby="focus-title" data-flip="focus"><div class="focus-label">${ICON.step}<span>What to do next</span></div>
         <h2 id="focus-title" tabindex="-1">${stuck ? 'Nothing fits right now' : "You're all clear."}</h2>
         <p>${stuck ? 'Some tasks need a deadline or more time. <button class="link on-dark-link" data-action="scrollAttention">See what needs attention</button>.' : 'No pending tasks. Open Ask SIKAD when something new comes up.'}</p></section>`;
     }
@@ -698,21 +764,23 @@
     const longTag = next.mins >= 90 ? '<span class="chip">Long session</span>' : '';
     const durLabel = task && task.isAiEstimate ? `<span class="est-dur">≈ ${T.dur(next.mins)}</span>` : T.dur(next.mins);
     return `
-      <section class="focus ${active ? 'active' : ''}" aria-labelledby="focus-title">
+      <section class="focus ${active ? 'active' : ''}" aria-labelledby="focus-title" data-flip="focus" data-sid="${esc(next.id)}">
+        <div class="focus-head" data-enter="fh:${esc(next.id)}">
         <div class="focus-label">${active ? `<span class="live-dot ${state.active.status === 'running' ? '' : 'is-still'}" aria-hidden="true"></span><span>${state.active.status === 'paused' ? 'Paused' : state.active.status === 'awaiting' ? 'Session ended' : 'In progress'}</span>` : `${ICON.step}<span>What to do next</span>`}</div>
         ${nowFixed && !active ? `<div class="focus-now">${ICON.lock}<span>Right now: ${esc(nowFixed.title)} until <span class="num">${T.timeShort(nowFixed.end)}</span></span></div>` : ''}
-        <h2 id="focus-title" tabindex="-1">${!active && startsNow && !STARTS_WITH_VERB.test(main) ? 'Start ' : ''}${esc(main)}</h2>
-        ${part ? `<div class="focus-part">— ${esc(part)}</div>` : ''}
+        <h2 id="focus-title" tabindex="-1"><span class="strike">${!active && startsNow && !STARTS_WITH_VERB.test(main) ? 'Start ' : ''}${esc(main)}</span></h2>
+        ${part ? `<div class="focus-part"><span class="strike">— ${esc(part)}</span></div>` : ''}
         <div class="focus-time num">${ICON.clock}<span><span class="nowrap">${T.rel(next.start, n)} · ${T.range(next.start, next.end)}</span> · <span class="nowrap">${durLabel}</span></span></div>
         <div class="focus-tags">${task && task.context ? `<span class="chip">${esc(task.context)}</span>` : ''}${task ? priChip(task.priority) : ''}${sessionTag}${longTag}${task && task.isAiEstimate ? estChip() : ''}</div>
         ${beforeNext && !active ? `<div class="focus-before">${ICON.lock}<span>Before that: ${esc(beforeNext.title)} · <span class="num">${T.range(beforeNext.start, beforeNext.end)}</span></span></div>` : ''}
-        ${active ? focusActive(next, task) : ui.focusPick === next.id ? focusPicker(next, task) : `
+        </div>
+        ${active ? focusActive(next, task) : ui.focusPick === next.id ? focusPicker(next, task) : `<div data-enter="fm:idle:${esc(next.id)}">
           ${why ? `<div class="why"><b>Why this?</b> ${esc(why)}</div>` : ''}
           <div class="focus-actions">
             <button class="btn primary" data-action="start" data-id="${next.id}">${ICON.play} Start task</button>
             <button class="btn on-dark" data-action="done" data-id="${next.id}" aria-label="Done: mark ${esc(next.title)} complete">${ICON.check} Done</button>
             <button class="btn on-dark" data-action="snooze" data-id="${next.id}" aria-label="Snooze: move to your next open block">Snooze</button>
-          </div>`}
+          </div></div>`}
       </section>`;
   }
 
@@ -739,7 +807,7 @@
     const chosen = ui.focusMethod || rec.method;
     const last = state.prefs.focusMethod;
     return `
-      <div class="method" role="group" aria-labelledby="method-title">
+      <div class="method" role="group" aria-labelledby="method-title" data-enter="fm:picker">
         <div class="method-rec">
           <div class="method-eyebrow">Suggested way to work</div>
           <h3 id="method-title">${esc(rec.name)}</h3>
@@ -768,7 +836,7 @@
       const partial = ui.focusPartial;
       const guess = Math.max(15, Math.round(Math.max(0, session.mins - t.focusedMins) / 15) * 15);
       return `
-        <div class="outcome" role="group" aria-labelledby="outcome-title">
+        <div class="outcome" role="group" aria-labelledby="outcome-title" data-enter="fm:outcome">
           <h3 id="outcome-title" tabindex="-1">Is this piece of work complete?</h3>
           <p>${t.finished ? 'The timer finished. ' : ''}You focused for <b class="num">${T.dur(Math.max(1, t.focusedMins))}</b> using ${esc(m.name.toLowerCase())}. A finished timer does not mark the task done. You decide.</p>
           ${partial ? `
@@ -789,15 +857,18 @@
     const steps = a.method === 'chunking' && a.steps ? a.steps : null;
     const paused = a.status === 'paused';
     return `
-      <div class="session">
+      <div class="session" data-enter="fm:session">
         <div class="session-method"><b>${esc(m.name)}</b><span id="focus-phase">${esc(paused ? 'Paused' : t.label)}</span></div>
         <div class="timer-row"><span id="focus-timer" class="num" role="timer" aria-label="${t.remainingMs == null ? 'Time focused' : 'Time left'}">${F.clock(t.remainingMs == null ? t.elapsedMs : t.remainingMs)}</span>
           <span class="timer-note">${t.remainingMs == null ? 'focused so far' : t.phase === 'break' ? 'of break left' : 'left'}</span></div>
         ${steps ? `<ol class="session-steps">${steps.map((st) => `<li>${esc(st.title)} <span class="num">${T.dur(st.mins)}</span></li>`).join('')}</ol>` : ''}
         <div class="focus-actions">
-          ${paused ? `<button class="btn primary" data-action="focusResume">${ICON.play} Resume</button>` : `<button class="btn primary" data-action="focusPause">Pause</button>`}
-          <button class="btn on-dark" data-action="focusEnd">End session</button>
+          ${paused ? `<button class="btn primary" data-action="focusResume">${ICON.play} Resume</button>` : ''}
+          <button class="btn ${paused ? 'on-dark' : 'primary'}" data-action="focusOutcome" data-v="complete" aria-label="Mark done: ${esc(session.title)} is complete">${ICON.check} Mark done</button>
+          ${paused ? '' : '<button class="btn on-dark" data-action="focusPause">Pause</button>'}
+          <button class="btn on-dark" data-action="focusEnd" aria-label="Stop early: end this session and say how it went">Stop early</button>
         </div>
+        <button class="link on-dark-link spot-toggle" data-action="spotlightToggle" aria-pressed="${!ui.spotlightOff}">${ui.spotlightOff ? 'Dim everything else' : 'Show my plan'}</button>
         <button class="demo-skip" data-action="focusSkip" data-mins="5"><span class="demo-tag">DEMO</span> Skip ahead 5 min</button>
       </div>`;
   }
@@ -807,7 +878,7 @@
     const out = [];
     if (ui.error) {
       out.push(`
-        <section class="status-card s-critical" role="alert" aria-labelledby="err-title">
+        <section class="status-card s-critical" role="alert" aria-labelledby="err-title" data-flip="err" data-flip-exit>
           <div class="sc-head">${ICON.alert}<h2 id="err-title">Couldn't update your plan</h2></div>
           <p>Your plan hasn't changed. ${esc(ui.error.detail || '')}</p>
           <div class="row">${ui.error.retrySheet ? '<button class="btn small" data-action="retryError">Try again</button>' : ''}<button class="btn small ghost" data-action="dismissError">Dismiss</button></div>
@@ -817,7 +888,7 @@
       const t = taskById(id);
       if (!t) continue;
       out.push(`
-        <section class="status-card s-clarify" aria-labelledby="nd-${t.id}">
+        <section class="status-card s-clarify" aria-labelledby="nd-${t.id}" data-flip="nd:${t.id}" data-flip-exit>
           <div class="sc-head">${ICON.question}<h2 id="nd-${t.id}">When is "${esc(t.title)}" due?</h2></div>
           <p>SIKAD won't guess a deadline. Add the date and it gets scheduled.</p>
           <div class="row"><label class="sr-only" for="dl-${t.id}">Deadline for ${esc(t.title)}</label><input type="datetime-local" id="dl-${t.id}"><button class="btn small" data-action="setDeadline" data-id="${t.id}">Schedule it</button></div>
@@ -828,7 +899,7 @@
       const crit = (state.alerts || []).find((a) => a.level === 'CRITICAL');
       const lows = unsched.filter((u) => (taskById(u.taskId) || {}).priority === 'low');
       out.push(`
-        <section class="status-card s-critical infeasible" aria-labelledby="inf-title">
+        <section class="status-card s-critical infeasible" aria-labelledby="inf-title" data-flip="inf" data-flip-exit>
           <div class="sc-head">${ICON.hourglass}<h2 id="inf-title">Not enough time</h2></div>
           ${crit ? `<p class="num">${esc(crit.message)}</p>` : ''}
           <ul class="unsched">${unsched.map((u) => `<li>
@@ -847,9 +918,9 @@
         </section>`);
     }
     const warns = (state.alerts || []).filter((a) => a.level === 'WARNING' && !/needs a deadline|waiting on/.test(a.message));
-    if (warns.length) out.push(`<section class="status-card s-clarify alerts">${warns.map((w) => `<p class="alert-line">${ICON.alert}<span>${esc(w.message)}</span></p>`).join('')}</section>`);
+    if (warns.length) out.push(`<section class="status-card s-clarify alerts" data-flip="warn" data-flip-exit>${warns.map((w) => `<p class="alert-line">${ICON.alert}<span>${esc(w.message)}</span></p>`).join('')}</section>`);
     const infos = (state.alerts || []).filter((a) => a.level === 'INFO');
-    if (infos.length) out.push(`<section class="status-panel s-info">${ICON.info}<div>${infos.map((w) => `<p>${esc(w.message)}</p>`).join('')}</div></section>`);
+    if (infos.length) out.push(`<section class="status-panel s-info" data-flip="info" data-flip-exit>${ICON.info}<div>${infos.map((w) => `<p>${esc(w.message)}</p>`).join('')}</div></section>`);
     return out.join('');
   }
 
@@ -866,7 +937,7 @@
     const sessions = state.focusLog.slice(-5).reverse();
     const win = ui.celebrate;
     return `
-      <section class="card week ${win ? 'win' : ''}" aria-labelledby="week-title">
+      <section class="card week ${win ? 'win' : ''}" aria-labelledby="week-title" data-flip="week">
         <div class="fit-head"><h2 id="week-title">This week</h2>${w.totalMins ? `<span class="week-pct num">${win ? ICON.check : ''}${w.percent}%</span>` : ''}</div>
         ${w.totalMins ? `
           <div class="bar week-bar" role="img" aria-label="${T.dur(w.doneMins)} done of ${T.dur(w.totalMins)} planned this week"><span style="--from:${from}%;width:${w.percent}%"></span></div>
@@ -888,7 +959,7 @@
     const pct = cap.free ? Math.min(100, Math.round((cap.required / cap.free) * 100)) : 100;
     const verdict = short ? `${ICON.alert}${T.dur(cap.required - cap.free)} short` : unsched ? `${ICON.hourglass}Not all of it` : `${ICON.check}Fits`;
     return `
-      <section class="card fit" aria-labelledby="fit-title">
+      <section class="card fit" aria-labelledby="fit-title" data-flip="fit">
         <div class="fit-head"><h2 id="fit-title">Does it all fit?</h2><span class="fit-verdict ${short || unsched ? 'bad' : 'good'}">${verdict}</span></div>
         <div class="bar ${short || unsched ? 'over' : ''}" role="img" aria-label="${T.dur(cap.required)} of work against ${approx(cap.free)} of open time"><span style="width:${pct}%"></span></div>
         <div class="fit-legend small num"><span><b>${T.dur(cap.required)}</b> of work due by ${T.DAY_SHORT[T.dow(cap.until)]}</span><span><b>${approx(cap.free)}</b> open</span></div>
@@ -902,8 +973,8 @@
     const items = [];
     for (const o of E.occurrences(state, dayMs)) items.push({ kind: o.kind, fixed: !o.soft, soft: o.soft, title: o.title, start: o.start, end: o.end, mode: o.mode, occ: o });
     for (const s of state.plan.filter((x) => T.dayStart(x.start) === dayMs)) items.push({ kind: 'task', title: s.title, start: s.start, end: s.end, session: s });
-    for (const h of state.history.filter((x) => T.dayStart(x.start) === dayMs)) items.push({ kind: 'done', title: h.title, start: h.start, end: h.end, taskId: h.taskId });
-    for (const c of state.checkins.filter((x) => T.dayStart(x.start) === dayMs)) items.push({ kind: 'missed', title: c.title, start: c.start, end: c.end, unitId: c.unitId });
+    for (const h of state.history.filter((x) => T.dayStart(x.start) === dayMs)) items.push({ kind: 'done', title: h.title, start: h.start, end: h.end, taskId: h.taskId, id: h.id, partial: !!h.partial });
+    for (const c of state.checkins.filter((x) => T.dayStart(x.start) === dayMs)) items.push({ kind: 'missed', title: c.title, start: c.start, end: c.end, unitId: c.unitId, id: c.id });
     // Open gaps worth knowing about.
     let free = E.freeSlots(state, Math.max(n, T.at(dayMs, b.dayStart)), T.at(dayMs, b.dayEnd));
     for (const s of state.plan) free = free.flatMap((f) => (s.end + 15 * T.MIN <= f.start || s.start - 15 * T.MIN >= f.end) ? [f]
@@ -915,7 +986,7 @@
     const nextId = (state.active && state.active.sessionId) || (E.nextSession(state.plan, n) || {}).id;
     const isToday = dayMs === T.dayStart(n);
     let nowPlaced = !isToday;
-    const nowLine = `<li class="tl-now"><span class="num">Now · ${T.time(n)}</span></li>`;
+    const nowLine = `<li class="tl-now" data-flip="now"><span class="num">Now · ${T.time(n)}</span></li>`;
     const rows = [];
     for (const it of items) {
       if (!nowPlaced && it.start > n) { rows.push(nowLine); nowPlaced = true; }
@@ -930,6 +1001,18 @@
     const u = state.lastUpdate;
     if (!u) return null;
     return u.changes.find((c) => c.action === 'RESCHEDULE' && c.to && c.title === session.title && c.to.start === session.start) || null;
+  }
+
+  /**
+   * Stable identity for a timeline row across renders, so a replan can slide the same card to its new
+   * slot (motion-spec §4). A completed session keeps its session's key: the row turns into its Done row.
+   */
+  function flipKey(it) {
+    if (it.kind === 'task') return `s:${it.session.id}`;
+    if (it.kind === 'done') return it.partial || !it.id ? `h:${it.id || it.start}` : `s:${String(it.id).split('@')[0]}`;
+    if (it.kind === 'missed') return `m:${it.id}`;
+    if (it.occ) return `f:${it.occ.id}:${it.start}`;
+    return `o:${it.kind}:${it.start}`;
   }
 
   /** One step on the day's path (design.md §7.4): square node = fixed, round = flexible, Butter ring = next. */
@@ -976,7 +1059,8 @@
     }
     const cls = ['tl-item', `k-${it.kind}`, it.fixed ? 'fixed' : '', past ? 'past' : '', current ? 'current' : '', it.session && movedInfo(it.session) ? 'just-moved' : ''].join(' ');
     const tag = action ? 'button' : 'div';
-    return `<li class="${cls}"><div class="tl-time num">${T.timeShort(it.start)}</div><div class="tl-rail" aria-hidden="true"><span class="tl-node ${node}"></span></div>
+    const leaves = it.kind === 'task' || it.kind === 'missed';
+    return `<li class="${cls}" data-flip="${esc(flipKey(it))}" ${leaves ? 'data-flip-exit' : ''} ${it.session ? `data-sid="${esc(it.session.id)}"` : ''}><div class="tl-time num">${T.timeShort(it.start)}</div><div class="tl-rail" aria-hidden="true"><span class="tl-node ${node}"></span></div>
       <${tag} class="tl-card" ${action} ${label ? `aria-label="${esc(label)}${current ? ', happening now' : ''}"` : ''}>
         <div class="tl-title">${icon ? `<span class="tl-icon" aria-hidden="true">${icon}</span>` : ''}<span class="tl-name">${title}</span>${current ? '<span class="chip now">Now</span>' : ''}</div>
         <div class="tl-meta num">${meta}</div>${chips ? `<div class="tl-chips">${chips}</div>` : ''}</${tag}></li>`;
@@ -1000,7 +1084,7 @@
     const compact = (m) => (m ? `${Math.round((m / 60) * 10) / 10}h` : '—');
     return `
       <header class="home-head">${themeToggle()}<div class="eyebrow">Next 7 days</div><h1>Overview</h1></header>
-      <section class="card fit" aria-labelledby="cap-title">
+      <section class="card fit" aria-labelledby="cap-title" data-flip="cap">
         <div class="fit-head"><h2 id="cap-title">Available vs. required</h2><span class="fit-verdict ${over ? 'bad' : 'good'}">${over ? `${ICON.alert}Over capacity` : `${ICON.check}Fits`}</span></div>
         <div class="bar ${over ? 'over' : ''}" role="img" aria-label="${T.dur(cap.required)} of tasks against ${approx(cap.free)} of usable time"><span style="width:${pct}%"></span></div>
         <p class="small num">You have <b>${approx(cap.free)}</b> of usable time in the next 7 days and <b>${T.dur(cap.required)}</b> of tasks due in that window.</p>
@@ -1030,10 +1114,10 @@
     return `
       <header class="home-head">${themeToggle()}<div class="eyebrow">${open.length} open · ${done.length} done</div><h1>Tasks</h1></header>
       <button class="btn block" data-action="newTask">${ICON.plus} Add a task manually</button>
-      ${attention.length ? `<h2 class="list-h">Needs attention</h2>${attention.map(taskCard).join('')}` : ''}
-      ${upcoming.length ? `<h2 class="list-h">Up next</h2>${upcoming.map(taskCard).join('')}` : ''}
+      ${attention.length ? `<h2 class="list-h" data-flip="lh:attention">Needs attention</h2>${attention.map(taskCard).join('')}` : ''}
+      ${upcoming.length ? `<h2 class="list-h" data-flip="lh:next">Up next</h2>${upcoming.map(taskCard).join('')}` : ''}
       ${!open.length ? '<p class="muted empty-tl">No open tasks. Open Ask SIKAD to add one.</p>' : ''}
-      ${done.length ? `<details class="done-list"><summary>Completed (${done.length})</summary>${done.map(taskCard).join('')}</details>` : ''}`;
+      ${done.length ? `<details class="done-list" data-flip="done-list"><summary>Completed (${done.length})</summary>${done.map(taskCard).join('')}</details>` : ''}`;
   }
 
   function taskCard(t) {
@@ -1047,7 +1131,7 @@
     const statusCls = t.status === 'done' ? 'st-done' : t.deadline == null ? 'st-clarify' : unsched ? 'st-critical' : '';
     const est = t.isAiEstimate ? `<span class="est-dur">≈ ${T.dur(total)}</span> ${estChip()}` : T.dur(total);
     return `
-      <button class="task-card ${t.status}" data-action="openTask" data-id="${t.id}">
+      <button class="task-card ${t.status}" data-action="openTask" data-id="${t.id}" data-flip="t:${t.id}">
         <div class="tc-head"><h3><span class="tc-icon" aria-hidden="true">${t.status === 'done' ? ICON.check : ICON.task}</span>${esc(t.title)}</h3>${t.status === 'done' ? '' : priChip(t.priority)}</div>
         ${t.context ? `<div class="tc-context">${esc(t.context)}</div>` : ''}
         <dl class="tc-meta num">
@@ -1697,6 +1781,10 @@
     dismissUpdate() { state.lastUpdate = null; render(); },
     skipToMain() { const m = document.getElementById('main'); if (m) m.focus(); },
     toggleTheme() {
+      const html = document.documentElement;
+      html.classList.add('theme-fade');                       // colours cross-fade once (motion-spec §5.4)
+      clearTimeout(themeFade);
+      themeFade = setTimeout(() => html.classList.remove('theme-fade'), M.DUR.enter + 40);
       applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
       render();
       const btn = document.querySelector('.theme-toggle');
@@ -1716,7 +1804,15 @@
     },
 
     // --- focus card
-    start(ds) { ui.focusPick = ds.id; ui.focusMethod = null; render(); const h = document.getElementById('method-title'); if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); } },
+    start(ds) {
+      ui.focusPick = ds.id; ui.focusMethod = null; ui.spotlightOff = false;
+      render();
+      const h = document.getElementById('method-title');
+      if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
+      // The spotlit card should be fully in view: bring its top up if the expanded card runs off screen.
+      const card = document.querySelector('.focus');
+      if (card) { const r = card.getBoundingClientRect(); if (r.top < 64 || r.bottom > window.innerHeight - 96) card.scrollIntoView({ block: 'start' }); }
+    },
     focusMethod(ds) { ui.focusMethod = ds.v; render(); },
     focusCancel() { ui.focusPick = null; ui.focusMethod = null; render(); },
     focusBegin(ds) {
@@ -1726,9 +1822,12 @@
       const opt = rec.options.find((o) => o.method === (ui.focusMethod || rec.method));
       snapshot('Start session');
       S.startSession(state, ds.id, opt.setup);
-      ui.focusPick = null; ui.focusMethod = null; ui.focusPartial = false;
+      ui.focusPick = null; ui.focusMethod = null; ui.focusPartial = false; ui.spotlightOff = false;
       render();
     },
+    // Leaving the spotlight only un-dims the screen. The session and its timer are untouched.
+    spotlightOff() { ui.spotlightOff = true; render(); },
+    spotlightToggle() { ui.spotlightOff = !ui.spotlightOff; render(); },
     focusPause() { S.pauseSession(state); render(); },
     focusResume() { S.resumeSession(state); render(); },
     focusSkip(ds) { S.skipSession(state, Number(ds.mins)); render(); tickTimer(); },
@@ -1762,8 +1861,7 @@
       const s = S.findSession(state, ds.id);
       S.completeSession(state, ds.id);
       ui.celebrate = true;
-      render();
-      toast(`"${s.title}" is done. Your plan has been updated.`, { undo: true });
+      settle(ds.id, () => toast(`"${s.title}" is done. Your plan has been updated.`, { undo: true }));
     },
     snooze(ds) {
       snapshot('Snooze');
@@ -1948,11 +2046,12 @@
     snapshot('End session');
     S.endFocus(state, { outcome, remainingMins, focusedMins });
     ui.focusPartial = false;
-    if (outcome === 'complete') ui.celebrate = true;
-    render();
-    toast(outcome === 'complete' ? `"${s.title}" is done. Your plan has been updated.`
+    const say = () => toast(outcome === 'complete' ? `"${s.title}" is done. Your plan has been updated.`
       : outcome === 'partial' ? `Progress saved. ${T.dur(remainingMins)} is back in your plan.`
       : 'Session recorded. The work is still on your plan.', { undo: true });
+    if (outcome === 'complete') { ui.celebrate = true; settle(s.id, say); return; }
+    render();
+    say();
   }
 
   function formValues(id) {
@@ -2031,6 +2130,8 @@
     if (!el || el.disabled) return;
     const fn = A[el.dataset.action];
     if (!fn) return;
+    // A completion is still settling: show its result now. A tap on a control that no longer exists is dropped.
+    if (pending) { render(); if (!el.isConnected) return; }
     if (el.dataset.action !== 'backdrop') e.preventDefault();
     // ERROR state (design.md §8): if an action throws, put the plan back exactly as it was and say so.
     const before = undoSnap, sheetBefore = ui.sheet ? JSON.parse(JSON.stringify(ui.sheet)) : null;
@@ -2097,6 +2198,7 @@
       }
     }
     if (e.key === 'Escape' && ui.sheet) A.closeSheet();
+    else if (e.key === 'Escape' && document.body.classList.contains('spotlight')) A.spotlightOff();
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && ui.sheet && ui.sheet.type === 'dump' && ui.sheet.mode === 'input') A.processDump();
   });
 

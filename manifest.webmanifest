@@ -1,0 +1,15 @@
+{
+  "name": "SIKAD — Find your next move",
+  "short_name": "SIKAD",
+  "description": "See what you can realistically get done with the time you actually have.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F5EC",
+  "theme_color": "#294B3A",
+  "icons": [
+    { "src": "icons/sikad.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/sikad.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

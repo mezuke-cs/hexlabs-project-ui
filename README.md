@@ -12,8 +12,8 @@ SIKAD is a working, clickable prototype of the product in [user_story.md](prompt
 2. Home shows the **Focus Card** ("What to do next" with *Why this?*), **This week** progress, "Does it all fit?", and the timeline.
 3. Open **Ask SIKAD** (centre button). Tap *How much usable time do I have tomorrow?* and *Can I realistically finish everything before Friday?* The answers are computed from the current plan.
 4. In Ask SIKAD, say or type **"I have a work shift tomorrow from 6 PM to 10 PM."** Review the interpreted commitment → *See plan changes* → the proposal lists what would move → **Accept changes** (or Reject: nothing changes).
-5. Demo clock (top bar) → **Mon 10:00 AM**. Tap **Start task**. SIKAD suggests a working method and says why. Pick one → *Start session* → Pause / Resume → *End session* → answer **Partly done** and enter what is left. The plan and **This week** update.
-6. Tap **Snooze** on the Focus Card for a one-tap replan.
+5. Demo clock (top bar) → **Mon 10:00 AM**. Tap **Start task**. The Focus Card expands, the rest of the screen dims, and SIKAD suggests a working method and says why. Pick one → *Start session* → Pause / Resume → *Stop early* → answer **Partly done** and enter what is left. The plan and **This week** update. Tap the dimmed area (or *Show my plan*) to leave the spotlight without stopping the timer.
+6. Tap **Snooze** on the Focus Card for a one-tap replan: the timeline cards slide to their new slots. Tap **Done** to see the title struck through before the next task appears.
 7. Try the other demo scenarios in Ask SIKAD: a clash with a class, a missing deadline, a task that depends on another, "write my essay", "I need another hour".
 8. **Profile → View engine output** shows the JSON for every request. **Profile → Reset demo to the initial scenario** restores Alex's week so the demo can be repeated.
 
@@ -41,6 +41,10 @@ Rules the engine enforces:
 
 The visual system follows [design.md](prompts/prompt-2/design.md) (rationale in [design-audit.md](prompts/prompt-2/design-audit.md)): Forest/Paper/Butter palette with verified-contrast tokens in `css/styles.css`, Plus Jakarta Sans + Inter self-hosted in `fonts/` (latin + latin-ext subsets, SIL OFL 1.1), and the "Grounded Path" timeline.
 
+Motion follows [motion-spec.md](motion-spec.md): the replan Shuffle, the completion strike and the Focus Mode spotlight are built with CSS and the Web Animations API in `js/motion.js`. There is no animation library. With "reduce motion" switched on in the OS, nothing animates and no information is lost.
+
+`manifest.webmanifest` and `icons/sikad.svg` let Chrome install SIKAD to a phone's home screen when it is served over HTTPS or localhost. There is no service worker, so the installed app still needs its files to be reachable.
+
 ## What is in the prototype
 
 | Part | What it does | Where |
@@ -50,7 +54,8 @@ The visual system follows [design.md](prompts/prompt-2/design.md) (rationale in 
 | Dictaphone | Browser speech recognition with Stop / Cancel; transcript is editable before sending | `js/app.js` |
 | Scheduling and replanning | Priority, 15-minute buffer, protected fixed commitments, honest `INFEASIBLE` | `js/engine.js` |
 | Proposals | A confirmed change is replanned on a copy; the student accepts or rejects the result | `js/app.js` `applyDump` |
-| Focus Mode | Working-method suggestion, timer, pause/resume/end, outcome question | `js/focus.js`, `js/store.js` |
+| Focus Mode | Working-method suggestion, spotlight, timer, pause/resume, mark done or stop early, outcome question | `js/focus.js`, `js/store.js` |
+| Motion | Cards slide to their new slots after a replan; completion strike; sheet, toast and card transitions | `js/motion.js`, `motion-spec.md` |
 | Weekly progress | Done work against planned work, focus-session history | `js/store.js` `weeklyProgress` |
 
 All of these read and write one state object, saved to `localStorage` after every change.
@@ -85,7 +90,7 @@ node tests/run-tests.js
 
 24 logic tests with no dependencies: capture and clarification, Ask SIKAD answers, replanning around a work shift, protected fixed commitments, the 15-minute buffer, infeasible plans, working-method suggestions, focus-session outcomes, weekly progress, and saved-data handling.
 
-Browser behaviour (rendering, voice capture, refresh, reset) was checked with a headless Chromium script during development. That script is not part of this repository.
+Browser behaviour (rendering, motion, Focus Mode, reduced motion, refresh, reset) was checked with a headless Chromium script during development, against the acceptance criteria in `motion-spec.md` §10. That script is not part of this repository.
 
 ## Changes from user_story.md
 
