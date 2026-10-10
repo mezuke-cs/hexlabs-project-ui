@@ -130,7 +130,10 @@
 html, body { margin: 0; }
 html { scroll-padding-top: 64px; scroll-padding-bottom: 104px; scroll-behavior: smooth; }
 ::selection { background: var(--butter); color: var(--on-butter); }
-button, a, input, select, textarea, summary { -webkit-tap-highlight-color: transparent; }
+button, a, input, select, textarea, summary, label { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+/* Long unbroken strings (IDs, URLs, pasted text) wrap instead of pushing the layout sideways. */
+body { overflow-wrap: break-word; }
+.tl-name, .tc-head h3, .focus h2, .focus-part, .ch-title, .sc-head h2, .unsched li > div, .plain li > span, .rc-context, .quote, .toast > span { overflow-wrap: anywhere; min-width: 0; }
 body {
   background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 22px;
   -webkit-font-smoothing: antialiased; overflow-x: hidden;
@@ -397,7 +400,7 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
 /* ---------- app shell ---------- */
 /* Demo clock: demo-only chrome (§7.12) */
 .clock-bar {
-  position: sticky; top: 0; z-index: 20; display: flex; gap: 6px; align-items: center; margin: 0 -16px; padding: 8px 16px;
+  position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; align-items: center; margin: 0 -16px; padding: 8px 16px; padding-top: calc(8px + env(safe-area-inset-top));
   background: var(--surface-2); border-bottom: 1px dashed var(--line-strong); overflow-x: auto; scrollbar-width: none;
 }
 .clock-bar::-webkit-scrollbar { display: none; }
@@ -470,7 +473,7 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
 .update { animation: cardIn .2s var(--ease-out); }
 @keyframes cardIn { from { opacity: 0; transform: translateY(8px); } }
 .changes { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 6px; }
-.changes li { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; background: var(--surface); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 14px; line-height: 20px; }
+.changes li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; background: var(--surface); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 14px; line-height: 20px; }
 .ch-title { font-weight: 600; color: var(--ink); }
 .ch-detail { grid-column: 1; color: var(--ink-2); font-size: 13px; }
 .ch-detail s { color: var(--ink-2); }
@@ -514,7 +517,7 @@ label > input, label > select, label > textarea, label > .hrs-input { margin-top
 
 /* ---------- timeline: the day as a path (§7.4) ---------- */
 .timeline { list-style: none; margin: 0; padding: 0; position: relative; }
-.tl-item { display: grid; grid-template-columns: 60px 20px 1fr; gap: 0 8px; align-items: stretch; position: relative; }
+.tl-item { display: grid; grid-template-columns: 60px 20px minmax(0, 1fr); gap: 0 8px; align-items: stretch; position: relative; }
 .tl-time { font-size: 12px; line-height: 16px; color: var(--ink-3); font-weight: 600; padding-top: 14px; text-align: right; white-space: nowrap; }
 .tl-rail { position: relative; }
 .tl-rail::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0; width: 2px; background: var(--line-strong); }
@@ -562,7 +565,7 @@ button.tl-card:hover { border-color: var(--line-strong); }
 .empty-tl { padding: 10px 0; }
 
 /* ---------- week / overview (§12.10) ---------- */
-.daystrip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 16px 0 4px; }
+.daystrip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin: 16px 0 4px; }
 .daychip { border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius-md); padding: 8px 0 6px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-2); min-width: 0; min-height: 76px; }
 .daychip:hover { border-color: var(--line-strong); }
 .daychip b { font-family: var(--font-display); font-size: 18px; line-height: 22px; color: var(--ink); }
@@ -697,3 +700,23 @@ body.sheet-open .toast { display: none; }
   .clock-now { min-width: 96px; }
 }
 .fab-label { white-space: nowrap; }
+
+/* Pressed feedback on every tappable surface (ui-ux-pro-max: press-feedback). Scale does not shift layout. */
+.chip-btn, .nav-btn, button.tl-card, .task-card, .daychip, .icon-btn, .seg button, .tabs button, .theme-toggle, .clock-now, .clock-step, .demo-link, .fab-circle, .upload {
+  transition: transform .12s var(--ease-out), background-color .12s;
+}
+:is(.chip-btn, .nav-btn, button.tl-card, .task-card, .daychip, .icon-btn, .seg button, .tabs button, .theme-toggle, .clock-now, .clock-step, .demo-link, .upload):active { transform: scale(.97); }
+.fab:active .fab-circle { transform: scale(.94); }
+:is(.nav-btn, .icon-btn):active { background: var(--surface-2); border-radius: var(--radius-md); }
+
+/* Skip link: first tab stop, visible only when focused. */
+.skip-link {
+  position: absolute; left: 16px; top: -64px; z-index: 40; min-height: var(--target); padding: 10px 16px;
+  background: var(--surface); color: var(--ink); border: 2px solid var(--ring); border-radius: var(--radius-pill); font-weight: 600; cursor: pointer;
+}
+.skip-link:focus { top: 8px; }
+main:focus { outline: none; }
+
+.req { font-weight: 400; color: var(--ink-3); }
+.grid2 > .field-error, .form > .field-error { grid-column: 1 / -1; margin: 0; }
+[aria-invalid="true"] { border: 2px solid var(--critical); }

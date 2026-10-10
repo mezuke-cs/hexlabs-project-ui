@@ -46,6 +46,19 @@ Rules the engine enforces:
 
 The visual system follows [design.md](prompts/prompt-2/design.md) (rationale in [design-audit.md](prompts/prompt-2/design-audit.md)): Forest/Paper/Butter palette with verified-contrast tokens in `css/styles.css`, Plus Jakarta Sans + Inter self-hosted in `fonts/` (latin + latin-ext subsets, SIL OFL 1.1), and the "Grounded Path" timeline.
 
+## Navigation and accessibility
+
+- Each tab has its own URL (`#home`, `#week`, `#tasks`, `#profile`). The browser or phone Back button closes an open sheet first, then steps back through tabs.
+- Unsent Brain dump text is kept if the sheet is dismissed.
+- Validation errors appear under the field they belong to and are announced to screen readers.
+- A "Skip to main content" control is the first keyboard stop. Controls are at least 44px tall, and layouts hold at 320px width and at 200% and 400% zoom.
+
+## Deliberate design choices
+
+- Body text is 15px, as design.md specifies. Inputs are 16px so iPhones do not zoom in on focus.
+- Font sizes are fixed pixels. Phone text-size settings still scale them; a desktop browser's default-font-size setting does not.
+- During the 4-step setup, the on-screen Back button moves between steps. The browser Back button is wired up only after setup.
+
 ## Demo-build limitations
 - **No LLM is called.** `parser.js` is a deterministic, rule-based stand-in that returns the same JSON contracts. To use a real model, call it with `prompt.md` as the system prompt from inside `TempoParser.parse`, and keep `engine.js` as the deterministic validator described in prompt.md §2.
 - COR photo/PDF upload is simulated: it loads the sample COR text.

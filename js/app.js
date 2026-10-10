@@ -92,7 +92,7 @@
   function setPath(obj, path, value) {
     const keys = path.split('.');
     let o = obj;
-    for (let i = 0; i < keys.length - 1; i++) o = o[keys[i]];
+    for (let i = 0; i < keys.length - 1; i++) { o = o[keys[i]]; if (o == null) return; } // e.g. a late change event after its sheet closed
     o[keys[keys.length - 1]] = value;
   }
   function convert(el) {
@@ -152,10 +152,42 @@
     return parts.length ? el.tagName.toLowerCase() + parts.join('') : null;
   };
 
+  // ---------------------------------------------------------- history --
+  // Browser/phone Back works like a native app: it closes an open sheet, then steps
+  // back through tabs. Each tab has a URL (#home, #week, #tasks, #profile).
+  const TABS = ['home', 'week', 'tasks', 'profile'];
+  let lastTab = null, fromPop = false, popsToIgnore = 0;
+  function syncHistory(opening, closing) {
+    if (!state.onboarded) { lastTab = null; return; }
+    const tabChanged = lastTab !== null && lastTab !== ui.tab;
+    lastTab = ui.tab;
+    if (fromPop) return;                                   // the browser already moved; nothing to record
+    const onSheetEntry = history.state && history.state.sikad === 'sheet';
+    try {
+      if (opening) history.pushState({ sikad: 'sheet' }, '');
+      else if (closing && onSheetEntry && tabChanged) history.replaceState({ sikad: 'tab' }, '', '#' + ui.tab);
+      else if (closing && onSheetEntry) { popsToIgnore++; history.back(); }
+      else if (tabChanged) history.pushState({ sikad: 'tab' }, '', '#' + ui.tab);
+    } catch (e) { /* history unavailable (sandboxed frame): navigation still works without it */ }
+  }
+  window.addEventListener('popstate', () => {
+    if (popsToIgnore > 0) { popsToIgnore--; return; }
+    fromPop = true;
+    if (ui.sheet) { stopVoice(); keepDraft(); ui.sheet = null; }
+    const t = location.hash.slice(1);
+    ui.tab = TABS.includes(t) ? t : 'home';
+    ui.focusOnly = false;
+    render();
+    fromPop = false;
+    const h = document.querySelector('main h1');           // focus-on-route-change
+    if (h && state.onboarded) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
+  });
+
   function render() {
     state.obDraft = state.onboarded ? null : ui.ob;
     S.save(state);
     const opening = !!ui.sheet && !sheetWasOpen;
+    syncHistory(opening, !ui.sheet && sheetWasOpen);
     if (opening) sheetOpener = describe(document.activeElement);
     const keep = !opening && !(sheetWasOpen && !ui.sheet) ? focusKey(document.activeElement) : null;
     $app.innerHTML = state.onboarded ? shell() : onboarding();
@@ -340,7 +372,6 @@
       ${micButton('ob.dumpText')}
       <label class="divider" for="dump-ob"><span>or type it out</span></label>
       <textarea id="dump-ob" rows="5" data-bind="ob.dumpText" placeholder="e.g. Database proposal due Friday, about 3 hours. Study for my math quiz on Wednesday…">${esc(ob.dumpText)}</textarea>
-      ${fieldError()}
       <button class="demo-link" data-action="obSampleDump"><span class="demo-tag">DEMO</span> Use Alex's example</button>
       <div class="ob-nav">
         <button class="btn ghost" data-action="obBack">Back</button>
@@ -399,8 +430,29 @@
       <div class="mic-label" aria-live="polite">${on ? 'Listening… tap to stop' : 'Tap to speak'}</div>
       ${ui.voiceNote ? `<p class="voice-note">${ICON.info}<span>Voice input isn't supported in this browser. Type it below instead.</span></p>` : ''}`;
   }
-  /** Inline validation message under a capture field (design.md §12.5). */
-  const fieldError = () => (ui.inputError ? `<p class="field-error" role="alert">${ICON.alert}<span>${esc(ui.inputError)}</span></p>` : '');
+  /**
+   * Show a validation error directly under its field, link it with aria-describedby,
+   * mark the field invalid and focus it. Cleared when the student edits the field.
+   */
+  function flagField(input, message) {
+    if (!input) return;
+    clearFieldError(input);
+    const id = `err-${input.id || input.name || input.dataset.bind || 'field'}`.replace(/[^\w-]/g, '-');
+    const p = document.createElement('p');
+    p.className = 'field-error'; p.id = id; p.setAttribute('role', 'alert');
+    p.innerHTML = `${ICON.alert}<span>${esc(message)}</span>`;
+    (input.closest('label') || input).insertAdjacentElement('afterend', p);
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', id);
+    input.focus();
+  }
+  function clearFieldError(input) {
+    const id = input.getAttribute && input.getAttribute('aria-describedby');
+    if (!input.hasAttribute || !input.hasAttribute('aria-invalid')) return;
+    const p = id && document.getElementById(id);
+    if (p) p.remove();
+    input.removeAttribute('aria-invalid'); input.removeAttribute('aria-describedby');
+  }
 
   /** Editable card for an extracted task (used in onboarding + brain dump review). */
   function taskReviewCard(it, path, n, scope) {
@@ -440,8 +492,9 @@
     const views = { home: homeView, week: weekView, tasks: tasksView, profile: profileView };
     return `
       <div class="screen app">
+        <button class="skip-link" data-action="skipToMain">Skip to main content</button>
         ${clockBar()}
-        <main class="view">${views[ui.tab]()}</main>
+        <main class="view" id="main" tabindex="-1">${views[ui.tab]()}</main>
         <nav class="bottom-nav" aria-label="Main">
           ${navBtn('home', 'Home', ICON.home)}
           ${navBtn('week', 'Overview', ICON.week)}
@@ -923,7 +976,7 @@
         ${micButton('sheet.text')}
         <label class="divider" for="dump-text"><span>or type it out</span></label>
         <textarea id="dump-text" rows="4" data-bind="sheet.text" placeholder="e.g. My boss asked me to cover a shift from 5 to 9 PM tonight">${esc(sh.text || '')}</textarea>
-        ${fieldError()}
+        ${sh.restored ? '<p class="small muted">Picked up the text you left here.</p>' : ''}
         <button class="btn primary block" data-action="processDump">Update my plan</button>
         <details class="scenarios" open>
           <summary><span class="demo-tag">DEMO</span> Demo scenarios</summary>
@@ -935,7 +988,7 @@
     const f = ui.sheet.form || (ui.sheet.form = { title: '', deadline: null, durationMins: 60, priority: 'medium', notes: '' });
     return `
       <div class="form">
-        <label>Task name<input value="${esc(f.title)}" data-bind="sheet.form.title" placeholder="e.g. ADET report"></label>
+        <label>Task name <span class="req">(required)</span><input value="${esc(f.title)}" data-bind="sheet.form.title" placeholder="e.g. ADET report" required aria-required="true"></label>
         <label>Deadline<input type="datetime-local" value="${f.deadline != null ? T.toInput(f.deadline) : ''}" data-bind="sheet.form.deadline" data-type="dt"></label>
         <label>Estimated duration (hours)<input type="number" min="0.25" step="0.25" value="${hrs(f.durationMins)}" data-bind="sheet.form.durationMins" data-type="hrs"></label>
         <label>Priority (optional)<select data-bind="sheet.form.priority">${['high', 'medium', 'low'].map((p) => `<option value="${p}" ${p === f.priority ? 'selected' : ''}>${PRI_LABEL[p]}</option>`).join('')}</select></label>
@@ -1159,6 +1212,7 @@
     }
     if (!triggers.length && !notes.length) { ui.sheet = null; render(); return; }
     S.replan(state, triggers.join(' · ') || 'Brain dump', { notes });
+    ui.dumpDraft = null;
     ui.sheet = null; ui.tab = 'home'; ui.focusOnly = false;
     render();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1330,8 +1384,7 @@
     obSampleDump() { ui.ob.dumpText = D.SAMPLE_BRAIN_DUMP; render(); },
     obParseDump() {
       const text = (ui.ob.dumpText || '').trim();
-      if (!text) { ui.inputError = 'Type or say what is on your plate first.'; render(); return; }
-      ui.inputError = null;
+      if (!text) { flagField(document.getElementById('dump-ob'), 'Nothing to extract yet. Type or say what is on your plate, e.g. "Math homework due tomorrow".'); return; }
       const parsed = P.parse(text, S.parseContext(state));
       S.log(state, 'Phase 2 · Brain dump', text, P.toPhase2(parsed));
       ui.ob.review = parsed.intents.map(intentToItem);
@@ -1379,6 +1432,7 @@
     showFullPlan() { ui.focusOnly = false; render(); },
     focusOnly() { ui.sheet = null; ui.tab = 'home'; ui.focusOnly = true; render(); window.scrollTo(0, 0); },
     dismissUpdate() { state.lastUpdate = null; render(); },
+    skipToMain() { const m = document.getElementById('main'); if (m) m.focus(); },
     toggleTheme() {
       applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
       render();
@@ -1425,7 +1479,7 @@
     setDeadline(ds) {
       const el = document.getElementById('dl-' + ds.id);
       const v = el && T.fromInput(el.value);
-      if (!v) { toast('Pick a date and time first.'); return; }
+      if (!v) { flagField(el, 'No date picked yet. Choose the due date and time, then tap Schedule it.'); return; }
       snapshot('Deadline');
       const t = taskById(ds.id);
       t.deadline = v;
@@ -1446,13 +1500,12 @@
     },
 
     // --- brain dump
-    openDump() { ui.inputError = null; ui.sheet = { type: 'dump', mode: 'input', text: '', input: 'text' }; render(); setTimeout(() => { const el = document.getElementById('dump-text'); if (el) el.focus(); }, 60); },
+    openDump() { ui.sheet = { type: 'dump', mode: 'input', text: ui.dumpDraft || '', input: 'text', restored: !!ui.dumpDraft }; render(); setTimeout(() => { const el = document.getElementById('dump-text'); if (el) el.focus(); }, 60); },
     dumpInput(ds) { ui.sheet.input = ds.v; render(); },
     scenario(ds) { ui.sheet.text = D.SCENARIOS[Number(ds.i)].text; render(); },
     processDump() {
       const text = (ui.sheet.text || '').trim();
-      if (!text) { ui.inputError = 'Say or type what changed first.'; render(); return; }
-      ui.inputError = null;
+      if (!text) { flagField(document.getElementById('dump-text'), 'Nothing to update yet. Say or type what changed, e.g. "I have to work tonight 6 to 10".'); return; }
       stopVoice();
       processDump(text);
       render();
@@ -1473,7 +1526,7 @@
     applyDump() { applyDump(); },
     saveManual() {
       const f = ui.sheet.form;
-      if (!f.title.trim()) { toast('Give the task a name.'); return; }
+      if (!f.title.trim()) { flagField(document.querySelector('[data-bind="sheet.form.title"]'), 'Task name is missing. Type a short name, e.g. "ADET report".'); return; }
       snapshot('Manual task');
       const { type, est } = P.classify(f.title);
       const task = S.makeTask(state, { title: P.titleCase(f.title.trim()), type, deadline: f.deadline, durationMins: f.durationMins || est,
@@ -1527,20 +1580,27 @@
     restoreOcc(ds) { baselineChange('Restored a cancelled session', () => { state.cancellations = state.cancellations.filter((c) => c !== ds.id); }); },
     addClass() {
       const f = formValues('add-class');
-      if (!f.title.trim() || f.end <= f.start) { toast('Add a subject and a valid time range.'); return; }
+      if (!f.title.trim()) { flagField(document.querySelector('#add-class [name="title"]'), 'Subject is missing. Type the class name or code, e.g. "IT 302".'); return; }
+      if (f.end <= f.start) { flagField(document.querySelector('#add-class [name="end"]'), 'End time must be later than the start time.'); return; }
       baselineChange(`Added class ${f.title}`, () => state.baseline.classes.push({ id: S.uid(state, 'c'), title: f.title.trim(), day: Number(f.day), start: f.start, end: f.end, mode: f.mode }));
     },
     addRecurringForm() {
       const f = formValues('add-rec');
-      if (!f.title.trim() || f.end <= f.start) { toast('Add a name and a valid time range.'); return; }
+      if (!f.title.trim()) { flagField(document.querySelector('#add-rec [name="title"]'), 'Name is missing. Type what the commitment is, e.g. "Org meeting".'); return; }
+      if (f.end <= f.start) { flagField(document.querySelector('#add-rec [name="end"]'), 'End time must be later than the start time.'); return; }
       baselineChange(`Added weekly ${f.title}`, () => S.addRecurring(state, { title: f.title.trim(), kind: f.kind, days: [Number(f.day)], start: f.start, end: f.end }));
     },
     openEngine() { ui.sheet = { type: 'engine' }; render(); },
 
     // --- sheet chrome
-    closeSheet() { stopVoice(); ui.sheet = null; render(); },
+    closeSheet() { stopVoice(); keepDraft(); ui.sheet = null; render(); },
     backdrop(ds, el, e) { if (e.target === el) A.closeSheet(); },
   };
+
+  /** Dismissing the Brain dump sheet must not throw away what the student typed. */
+  function keepDraft() {
+    if (ui.sheet && ui.sheet.type === 'dump') ui.dumpDraft = (ui.sheet.text || '').trim() || null;
+  }
 
   function formValues(id) {
     const out = {};
@@ -1623,6 +1683,7 @@
 
   document.addEventListener('input', (e) => {
     const el = e.target;
+    clearFieldError(el);
     if (el.dataset.bind && el.type !== 'checkbox' && el.tagName !== 'SELECT' && !['datetime-local', 'time'].includes(el.type)) {
       setPath(ui, el.dataset.bind.replace(/^ob\./, 'ob.'), convert(el));
       if (el.dataset.est) setPath(ui, el.dataset.est, false);
@@ -1671,6 +1732,9 @@
 
   // Keep the toggle's icon in sync when following the OS setting and it changes.
   if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', () => { if (!document.documentElement.dataset.theme) render(); });
+
+  // Deep link: open the tab named in the URL (e.g. index.html#tasks).
+  if (state.onboarded && TABS.includes(location.hash.slice(1))) ui.tab = location.hash.slice(1);
 
   render();
 })();
