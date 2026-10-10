@@ -298,6 +298,38 @@
     return scored.filter((x) => x.shared === scored[0].shared).map((x) => x.o);
   }
 
+  // ------------------------------------------------- progress statements --
+  /** "another hour", "30 more minutes", "an extra half hour" → minutes, else null. */
+  function parseExtra(clause) {
+    const lower = clause.toLowerCase();
+    let m = lower.match(/\banother\s+(half(?:\s+an?)?\s+hour|hour|\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?))/);
+    if (m) {
+      if (/half/.test(m[1])) return 30;
+      if (m[1] === 'hour') return 60;
+      const d = parseDuration(m[1]); return d ? d.mins : null;
+    }
+    m = lower.match(/\b(\d+(?:\.\d+)?|an?|one|two|three|four|five)\s+(?:more|extra|additional)\s+(hours?|hrs?|minutes?|mins?)\b/) ||
+        lower.match(/\b(\d+(?:\.\d+)?|an?|one|two|three|four|five)\s+(hours?|hrs?|minutes?|mins?)\s+(?:more|longer|extra)\b/);
+    if (m) { const n = numVal(m[1]); return Math.round(/^h/.test(m[2]) ? n * 60 : n); }
+    m = lower.match(/\bhalf an? hour\s+(?:more|longer|extra)\b|\b(?:more|extra)\s+half an? hour\b/);
+    return m ? 30 : null;
+  }
+
+  const ORDINALS = { first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2, fourth: 3, '4th': 3 };
+  /** Which part of `task` does the clause say is finished? By name, by ordinal, else the next pending one. */
+  function matchPart(clause, task) {
+    const parts = task.parts || [];
+    if (!parts.length) return null;
+    const ct = new Set(tokens(clause));
+    const byName = parts.find((p) => !p.done && tokens(p.title).some((w) => ct.has(w)));
+    if (byName) return byName;
+    const ord = clause.toLowerCase().match(/\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\b/);
+    if (ord) return ord[1] === 'last' ? parts[parts.length - 1] : parts[ORDINALS[ord[1]]] || null;
+    return parts.find((p) => !p.done) || null;
+  }
+  const PART_RE = /\b(part|step|section|half|chunk|portion|milestone)\b/i;
+  const currentTask = (ctx, tasks) => (ctx.currentTaskId ? tasks.find((t) => t.id === ctx.currentTaskId && t.status !== 'done' && t.status !== 'cancelled') : null) || null;
+
   // ------------------------------------------------------------ main parse --
   function eventTitle(clause) {
     const lower = clause.toLowerCase();
@@ -359,6 +391,31 @@
         }
       }
 
+      // More time needed ("I need another hour to finish this task").
+      const extra = !time ? parseExtra(clause) : null;
+      if (extra && /\b(need|needs|take|takes|add|give|finish|complete|more time)\b/.test(lower)) {
+        const t = matchTask(clause, tasks) || currentTask(ctx, tasks);
+        if (t) result.intents.push({ type: 'extend', taskId: t.id, title: t.title, addMins: extra });
+        else result.intents.push({ type: 'unclear', question: `Which task needs ${T.dur(extra)} more? Name it, e.g. "The database proposal needs another hour."` });
+        continue;
+      }
+      // Part of a task finished ("I finished the first part of my project").
+      if (DONE_RE.test(lower) && !NEG_RE.test(lower) && PART_RE.test(lower)) {
+        const candidates = tasks.filter((x) => x.status !== 'done' && x.status !== 'cancelled' && (x.parts || []).some((pp) => !pp.done));
+        const ct = new Set(tokens(clause));
+        const byPartName = candidates.filter((x) => x.parts.some((pp) => !pp.done && tokens(pp.title).some((w) => ct.has(w))));
+        const cur = currentTask(ctx, tasks);
+        const t = matchTask(clause, tasks) || (byPartName.length === 1 ? byPartName[0] : null) ||
+          (cur && candidates.includes(cur) ? cur : null) || (candidates.length === 1 ? candidates[0] : null) || (candidates.length === 0 ? cur : null);
+        if (t) {
+          const part = matchPart(clause, t);
+          if (part && !part.done) result.intents.push({ type: 'complete_part', taskId: t.id, title: t.title, partId: part.id, partTitle: part.title });
+          else result.intents.push({ type: 'partial', taskId: t.id, title: t.title, remainingMins: null });
+        } else {
+          result.intents.push({ type: 'unclear', question: 'Which task did you finish part of? Name it, e.g. "I finished the first part of the database proposal."' });
+        }
+        continue;
+      }
       // Missed / unfinished work.
       if (NEG_RE.test(lower) && /\b(finish|complete|do|start|get to|study|work on|make it)\b/.test(lower)) {
         const t = matchTask(clause, tasks);
@@ -394,7 +451,15 @@
       const dur = parseDuration(clause);
       const context = extractContext(clause);
       const parts = extractParts(clause);
-      const removeTexts = [date && date.text, dur && dur.text, time && time.text, context && context.text];
+      // Dependency ("…after the database proposal"): only when the phrase names a known or just-captured task.
+      let dependsOn = null;
+      const depM = clause.match(/[,;]?\s*\b(?:after|once)\s+(?:i\s+(?:finish|complete|am done with|'m done with)\s+|finishing\s+|completing\s+)?(?:the\s+|my\s+)?([^,.;]+?)(?:\s+is\s+(?:done|finished|complete))?\s*$/i);
+      if (depM && !/^\d|\b(class|lunch|dinner|school|work)\b/i.test(depM[1])) {
+        const pool = tasks.concat(result.intents.filter((i) => i.type === 'task').map((i, n) => ({ id: `new:${n}`, title: i.task.title, context: i.task.context, status: 'pending' })));
+        const target = matchTask(depM[1], pool);
+        if (target) dependsOn = { id: target.id, title: target.title, text: depM[0] };
+      }
+      const removeTexts = [dependsOn && dependsOn.text, date && date.text, dur && dur.text, time && time.text, context && context.text];
       let title = buildTitle(clause, removeTexts, ctype);
       if (context && title && !/\s/.test(title)) title = `${context.code} ${title}`;
       const looksLikeTask = ctype !== 'task' || dur || /\b(due|need to|have to|must|should|gotta|deadline)\b/i.test(lower);
@@ -413,7 +478,8 @@
       }
 
       // Existing task mentioned again → answer, duplicate, or contradiction (§18).
-      const existing = looksLikeTask || date ? matchTask(clause, tasks, ctype) : null;
+      const ownText = dependsOn ? clause.replace(dependsOn.text, '') : clause; // don't match the task it depends on
+      const existing = looksLikeTask || date ? matchTask(ownText, tasks, ctype) : null;
       if (existing && !parts.length) {
         if (date && !date.ambiguous) {
           const dl = deadlineFor(date.day, time, existing.type, ctx);
@@ -444,7 +510,8 @@
         durationMins, isAiEstimate: !dur,
         priority: defaultPriority(ctype, deadline, now, clause),
         parts: parts.map((p) => ({ title: p, mins: 0 })),
-        dependencies: [],
+        dependencies: dependsOn && !dependsOn.id.startsWith('new:') ? [dependsOn.id] : [],
+        dependsOnTitle: dependsOn ? dependsOn.title : null,
       };
       if (task.parts.length) splitPartMins(task);
       else task.parts = suggestParts(ctype, durationMins);
@@ -555,5 +622,5 @@
     return i.question || 'I want to help! Can you tell me specifically what changed? For example: Did you miss a task? Get a new assignment? Have a schedule change?';
   }
 
-  root.TempoParser = { parse, parseSchedule, toPhase2, parseDuration, parseDate, parseTimes, splitClauses, classify, suggestParts, unclearQuestion, titleCase, tokens };
+  root.TempoParser = { parse, parseSchedule, toPhase2, parseDuration, parseDate, parseTimes, parseExtra, splitClauses, classify, suggestParts, unclearQuestion, titleCase, tokens, matchTask };
 })(typeof window !== 'undefined' ? window : globalThis);

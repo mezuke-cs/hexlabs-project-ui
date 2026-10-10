@@ -624,7 +624,7 @@ They're plain text in `--ink-3`, without illustration.
     - Infeasible lives on Home with the triage options. Unscheduled tasks also appear in Tasks → "Needs attention" with the status text "Doesn't fit yet".
 13. **Focus session** (in scope as the minimal version)
     - The Focus Card's in-progress state (§7.3): timer, Mark done, Didn't finish.
-    - No Pomodoro in the MVP (see audit B5). If added later, it's an opt-in preference that never changes block times.
+    - **Amended by the final implementation brief (§11):** Start task now opens a working-method suggestion inside the Focus Card: task chunking, Pomodoro, timeboxing, or no method. The suggestion states its reason and the student can pick any option. Methods never change block times. A finished timer never completes a task; the student is asked.
 14. **Settings and baseline editing**
     - **Goal:** an editable baseline.
     - **Hierarchy:** h1 name → cards: "Your day" (selects) → "Class schedule (fixed)" (rows with lock and remove; add form in a disclosure) → "Recurring commitments" → "One-time commitments" → "Cancelled sessions" (Restore) → "Connected platforms" → "Under the hood" (demo style, §7.12) → destructive "Reset" last.
@@ -649,7 +649,7 @@ The redesign is **visual and copy only.** The implementation pass must not:
 5. Turn Brain Dump into a chat transcript (story §16, §23).
 6. Remove one-tap Snooze or Done.
 7. Promote optional features (capacity visuals, integrations, focus methods) above the Focus Card.
-8. Add gamification (streaks, points, badges) or "magic" AI styling.
+8. Add streaks, points, badges, leaderboards or "magic" AI styling. **Amended by the final implementation brief (§10):** a supportive weekly progress indicator, a count of focus sessions, and a subtle completion animation are allowed and built. They must be computed from real state and must never frame a reschedule as failure.
 
 **Copy may change** (tone, the SIKAD name) as long as the meaning of every engine message is preserved.
 
@@ -724,3 +724,20 @@ The redesign is **visual and copy only.** The implementation pass must not:
 - [ ] Keyboard-only run of onboarding → Brain Dump → conflict choice → Apply → Undo, with a visible focus ring throughout and focus returned after sheets close.
 - [ ] Usable at 320 px width and at 200 % text zoom.
 - [ ] The existing demo scenarios (the 10 chips) and the Monday story still produce the same engine outputs (compare the engine JSON viewer before and after).
+
+---
+
+## 16. Amendments from the final implementation brief
+
+`prompts/prompt-5/sikad_final_implementation.md` extends this spec. Where they differ, the brief wins. Nothing in the colour, type or spacing system changed.
+
+| Area | Was | Now |
+|---|---|---|
+| Capture panel name | "Brain dump" sheet (changes only) | **Ask SIKAD** panel: answers questions about the plan and accepts changes. The setup step keeps the name "Brain dump". |
+| Voice | Mic toggle | **Dictaphone** states: ready → recording (Stop / Cancel) → editable transcript. A labelled demo fallback appears when the browser has no speech recognition. |
+| Applying a change from Ask SIKAD | Applied at once, with Undo | Two confirmations: review the interpretation, then **Accept or Reject the proposed plan**. One-tap Done and Snooze on the Focus Card still apply at once with Undo. |
+| Focus session | Elapsed timer only | Working-method suggestion, Pause / Resume / End, then "Is this piece of work complete?" |
+| Progress | Not allowed ("gamification") | **This week** card: a horizontal bar and plain numbers. No streaks, points, badges or circular meters. |
+| Brief §13 "Notion-inspired desktop workspace, blue accents" | n/a | **Not applied.** The existing phone-first Forest / Paper / Butter design in this document was kept, because the brief also says not to redesign the existing interface. |
+
+New components reuse existing tokens: Ask answers use the card style with a Forest rail (Amber when information is missing); Focus Mode panels use `--focus-panel` and `--focus-edge`; the progress bar uses `--progress` on `--progress-track`.

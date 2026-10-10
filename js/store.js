@@ -22,15 +22,45 @@
       tasks: [], events: [], cancellations: [],
       plan: [], unscheduled: [], needsDeadline: [], alerts: [], status: 'SUCCESS',
       history: [], checkins: [], active: null, lastUpdate: null,
+      workLog: [],      // { taskId, mins, at } — work actually credited; basis of weekly progress
+      focusLog: [],     // { id, taskId, title, method, at, focusedMins, outcome } — one entry per session the student ended
+      prefs: {},        // { focusMethod } — last working method the student chose
       engineLog: [], seq: 1,
     };
+  }
+
+  const ARRAYS = ['tasks', 'events', 'cancellations', 'plan', 'unscheduled', 'needsDeadline', 'alerts', 'history', 'checkins', 'workLog', 'focusLog', 'engineLog'];
+  /** Stored data from an older build, or damaged by hand, must not break the app: repair what is safe, else start fresh. */
+  function sanitize(saved) {
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return null;
+    const base = initialState();
+    const st = Object.assign(base, saved);
+    for (const k of ARRAYS) if (!Array.isArray(st[k])) st[k] = [];
+    if (!st.baseline || typeof st.baseline !== 'object' || !Array.isArray(st.baseline.classes) || !Array.isArray(st.baseline.recurring)) return null;
+    st.baseline = Object.assign(initialState().baseline, st.baseline);
+    if (typeof st.now !== 'number' || !isFinite(st.now)) return null;
+    if (!st.user || typeof st.user !== 'object') st.user = { name: '' };
+    if (!st.prefs || typeof st.prefs !== 'object') st.prefs = {};
+    if (!st.integrations || typeof st.integrations !== 'object') st.integrations = {};
+    st.tasks = st.tasks.filter((t) => t && typeof t.id === 'string' && typeof t.title === 'string');
+    for (const t of st.tasks) { if (!Array.isArray(t.parts)) t.parts = []; if (!Array.isArray(t.dependencies)) t.dependencies = []; }
+    if (st.active && !st.plan.some((x) => x && x.id === st.active.sessionId)) st.active = null;
+    return st;
   }
 
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) return Object.assign(initialState(), JSON.parse(raw));
-    } catch (e) { /* storage unavailable — start fresh */ }
+      if (raw) {
+        const st = sanitize(JSON.parse(raw));
+        if (st) return st;
+        const fresh = initialState(); fresh.loadNotice = 'Saved data could not be read, so SIKAD started fresh.';
+        return fresh;
+      }
+    } catch (e) {
+      const fresh = initialState(); fresh.loadNotice = 'Saved data could not be read, so SIKAD started fresh.';
+      return fresh;
+    }
     return initialState();
   }
   function save(state) {
@@ -123,9 +153,25 @@
     return state.plan.find((s) => s.id === id) || state.checkins.find((s) => s.id === id) || null;
   }
 
+  /** Run a change to one task and record how many minutes of remaining work it removed (never negative). */
+  function withWorkLog(state, task, fn) {
+    const before = taskRemaining(task);
+    fn();
+    const credited = before - taskRemaining(task);
+    if (credited > 0) state.workLog.push({ taskId: task.id, mins: credited, at: state.now });
+    return credited;
+  }
+
   function creditWork(state, s) {
     const task = state.tasks.find((t) => t.id === s.taskId);
     if (!task) return null;
+    withWorkLog(state, task, () => applySessionCredit(task, s));
+    if (taskRemaining(task) === 0) task.status = 'done';
+    else if (task.status === 'in_progress' && !(state.active && state.active.sessionId !== s.id)) task.status = 'pending';
+    return task;
+  }
+
+  function applySessionCredit(task, s) {
     if (s.partId) {
       const part = task.parts.find((p) => p.id === s.partId);
       if (part) {
@@ -135,17 +181,137 @@
     } else {
       task.remainingMins = Math.max(0, task.remainingMins - s.mins);
     }
+  }
+
+  // ------------------------------------------------------- focus sessions --
+  // state.active is the one running/paused focus session. Timing uses real elapsed
+  // milliseconds (elapsedMs + time since resumedAt) so it survives a page refresh.
+  function startSession(state, id, setup = {}) {
+    const s = findSession(state, id);
+    if (!s) return;
+    const real = Date.now();
+    state.active = Object.assign({ sessionId: id, startedAt: state.now, realStartedAt: real,
+      method: 'none', status: 'running', elapsedMs: 0, resumedAt: real }, setup);
+    if (setup.method) state.prefs.focusMethod = setup.method;
+    const task = state.tasks.find((t) => t.id === s.taskId);
+    if (task) task.status = 'in_progress';
+  }
+  const focusElapsedMs = (a, real = Date.now()) => (a ? a.elapsedMs + (a.status === 'running' ? Math.max(0, real - a.resumedAt) : 0) : 0);
+  function pauseSession(state) {
+    const a = state.active;
+    if (!a || a.status !== 'running') return;
+    a.elapsedMs = focusElapsedMs(a); a.status = 'paused';
+  }
+  function resumeSession(state) {
+    const a = state.active;
+    if (!a || a.status !== 'paused') return;
+    a.resumedAt = Date.now(); a.status = 'running';
+  }
+  /** Demo aid: move the session timer forward without waiting. */
+  function skipSession(state, mins) {
+    if (state.active) state.active.elapsedMs += mins * MIN;
+  }
+
+  function setUnitRemaining(task, partId, mins) {
+    if (partId) {
+      const part = task.parts.find((p) => p.id === partId);
+      part.remainingMins = mins; part.done = mins === 0;
+      if (mins > part.mins) part.mins = mins;
+    } else {
+      task.remainingMins = mins;
+      if (mins > task.durationMins) task.durationMins = mins;
+    }
+  }
+
+  /**
+   * The student ends a focus session and says how it went. Only this records a session:
+   * a timer reaching zero never completes a task or counts a session by itself.
+   *   complete   → this piece of work is done
+   *   partial    → some is done; `remainingMins` is what the student says is left
+   *   unfinished → nothing to credit; the work stays on the plan
+   */
+  function endFocus(state, { outcome, remainingMins, focusedMins }) {
+    const a = state.active;
+    if (!a) return null;
+    const s = findSession(state, a.sessionId);
+    if (!s) { state.active = null; return null; }
+    state.focusLog.push({ id: `f_${String(state.focusLog.length + 1).padStart(3, '0')}`, taskId: s.taskId, title: s.title, method: a.method, at: state.now,
+      focusedMins: Math.max(0, Math.round(focusedMins || 0)), outcome });
+    if (outcome === 'complete') return completeSession(state, s.id);
+    const task = state.tasks.find((t) => t.id === s.taskId);
+    const notes = [];
+    let trigger = `Session ended, not finished yet: ${s.title}`;
+    if (outcome === 'partial') {
+      const left = Math.max(5, Math.round(remainingMins));
+      const before = s.partId ? task.parts.find((p) => p.id === s.partId).remainingMins : task.remainingMins;
+      withWorkLog(state, task, () => setUnitRemaining(task, s.partId, left));
+      state.history.push({ id: s.id + '@' + state.now, taskId: s.taskId, title: s.title, start: Math.min(s.start, state.now), end: state.now, doneAt: state.now, partial: true });
+      trigger = `Partly done: ${s.title} (${T.dur(left)} left)`;
+      notes.push(left > before ? 'The estimate grew, so the plan now holds more time for it.' : 'Your progress is saved. The rest is back in the plan.');
+    } else {
+      notes.push('Nothing is lost. The work is still on your plan.');
+    }
+    task.status = 'pending';
+    state.active = null;
+    return replan(state, trigger, { notes, silent: true });
+  }
+
+  // ------------------------------------------------- progress statements --
+  /** "I need another hour": add time to the next unfinished piece of the task. */
+  function extendTask(state, taskId, addMins) {
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) return null;
+    const part = (task.parts || []).find((p) => !p.done);
+    if (part) { part.mins += addMins; part.remainingMins += addMins; } else task.remainingMins += addMins;
+    task.durationMins += addMins;
+    task.isAiEstimate = false;
+    return task;
+  }
+  function completePart(state, taskId, partId) {
+    const task = state.tasks.find((t) => t.id === taskId);
+    const part = task && task.parts.find((p) => p.id === partId);
+    if (!part) return null;
+    withWorkLog(state, task, () => { part.done = true; part.remainingMins = 0; });
+    state.history.push({ id: `${task.id}:${partId}@${state.now}`, taskId, title: `${task.title} — ${part.title}`, start: state.now, end: state.now, doneAt: state.now });
     if (taskRemaining(task) === 0) task.status = 'done';
-    else if (task.status === 'in_progress' && !(state.active && state.active.sessionId !== s.id)) task.status = 'pending';
+    return task;
+  }
+  function completeTask(state, taskId) {
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) return null;
+    withWorkLog(state, task, () => { (task.parts || []).forEach((p) => { p.done = true; p.remainingMins = 0; }); task.remainingMins = 0; });
+    task.status = 'done';
+    state.history.push({ id: `${task.id}@${state.now}`, taskId, title: task.title, start: state.now, end: state.now, doneAt: state.now });
+    return task;
+  }
+  function setTaskRemaining(state, taskId, mins) {
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) return null;
+    const part = (task.parts || []).find((p) => !p.done);
+    withWorkLog(state, task, () => setUnitRemaining(task, part ? part.id : null, Math.max(5, Math.round(mins))));
     return task;
   }
 
-  function startSession(state, id) {
-    const s = findSession(state, id);
-    if (!s) return;
-    state.active = { sessionId: id, startedAt: state.now, realStartedAt: Date.now() };
-    const task = state.tasks.find((t) => t.id === s.taskId);
-    if (task) task.status = 'in_progress';
+  // ------------------------------------------------------ weekly progress --
+  /**
+   * Weekly progress (Mon–Sun, from the current clock):
+   *   done    = minutes of work credited this week (completed or partly completed work)
+   *   left    = minutes still scheduled between now and Sunday night
+   *   percent = done / (done + left)
+   * Replanning work into next week lowers `left` (the plan changed); it never lowers `done`.
+   */
+  function weeklyProgress(state) {
+    const now = state.now;
+    const weekStart = T.dayStart(now) - ((T.dow(now) + 6) % 7) * T.DAY;
+    const weekEnd = weekStart + 7 * T.DAY;
+    const inWeek = (ms) => ms >= weekStart && ms < weekEnd;
+    const doneMins = state.workLog.filter((w) => inWeek(w.at)).reduce((a, w) => a + w.mins, 0);
+    const leftMins = state.plan.filter((x) => x.end > now && x.start < weekEnd).reduce((a, x) => a + x.mins, 0);
+    const sessions = state.focusLog.filter((f) => inWeek(f.at));
+    const total = doneMins + leftMins;
+    return { weekStart, weekEnd, doneMins, leftMins, totalMins: total, percent: total ? Math.round((doneMins / total) * 100) : 0,
+      focusSessions: sessions.length, focusedMins: sessions.reduce((a, f) => a + f.focusedMins, 0),
+      tasksDone: new Set(state.workLog.filter((w) => inWeek(w.at)).map((w) => w.taskId).filter((id) => (state.tasks.find((t) => t.id === id) || {}).status === 'done')).size };
   }
 
   function completeSession(state, id) {
@@ -159,7 +325,7 @@
     state.checkins = state.checkins.filter((c) => c.id !== id);
     if (state.active && state.active.sessionId === id) state.active = null;
     const notes = [];
-    if (task && task.status === 'done') notes.push(`"${task.title}" is complete. 🎉`);
+    if (task && task.status === 'done') notes.push(`"${task.title}" is complete.`);
     return replan(state, `Marked done: ${s.title}`, { notes, silent: true });
   }
 
@@ -250,6 +416,8 @@
     return {
       now: state.now, tasks: state.tasks, dayStartHm: state.baseline.dayStart,
       occurrencesFor: (day) => E.occurrences(state, day),
+      // "this task" = the one being worked on, else the next one recommended
+      currentTaskId: (state.active && (findSession(state, state.active.sessionId) || {}).taskId) || (E.nextSession(state.plan, state.now) || {}).taskId || null,
     };
   }
 
@@ -271,7 +439,9 @@
 
   root.TempoStore = {
     KEY, clone, initialState, load, save, reset, uid, log, taskRemaining, taskTotal, makeTask, setDuration,
-    replan, findSession, startSession, completeSession, snoozeSession, dismissCheckin, setClock,
+    replan, findSession, startSession, pauseSession, resumeSession, skipSession, focusElapsedMs, endFocus,
+    completeSession, snoozeSession, dismissCheckin, setClock,
+    extendTask, completePart, completeTask, setTaskRemaining, weeklyProgress, sanitize,
     addEvent, addRecurring, cancelOccurrence, classesFromPhase1, applyLifestyle, parseContext, loadDemo,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

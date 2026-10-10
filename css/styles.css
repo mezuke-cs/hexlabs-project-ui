@@ -720,3 +720,97 @@ main:focus { outline: none; }
 .req { font-weight: 400; color: var(--ink-3); }
 .grid2 > .field-error, .form > .field-error { grid-column: 1 / -1; margin: 0; }
 [aria-invalid="true"] { border: 2px solid var(--critical); }
+
+/* ---------- Ask SIKAD panel: a supporting thread, not a chat screen ---------- */
+.ask-thread { display: grid; gap: 12px; margin: 12px 0; }
+.ask-q { margin: 0 0 6px; font-size: 13px; line-height: 18px; color: var(--ink-2); padding-left: 10px; border-left: 3px solid var(--line-strong); overflow-wrap: anywhere; }
+.ask-a { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--forest); border-radius: var(--radius-md); padding: 12px; }
+.ask-a.is-missing { border-left-color: var(--warn); }
+.ask-a:focus { outline: none; }
+.ask-a:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ask-a h3 { font-size: 16px; line-height: 22px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.ask-a p { margin: 4px 0; color: var(--ink-2); }
+.ask-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 12px; margin: 8px 0 0; font-size: 13px; line-height: 18px; }
+.ask-facts div { display: contents; }
+.ask-facts dt { color: var(--ink-3); }
+.ask-facts dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.ask-examples { margin-top: 12px; }
+.ask-examples p { margin: 0; color: var(--ink-2); font-weight: 600; }
+.ask-examples .chip-btn { font-size: 13px; text-align: left; }
+
+/* ---------- dictaphone ---------- */
+.dict { margin: 12px 0 4px; }
+.dict.recording { background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-lg); padding: 12px 14px; }
+.dict-status { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.dict-status .num { margin-left: auto; font-weight: 600; }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--critical); animation: blink 1.2s infinite; }
+.dict-interim { margin: 8px 0; min-height: 44px; color: var(--ink-2); font-size: 15px; line-height: 22px; overflow-wrap: anywhere; }
+.dict-controls { margin: 0; }
+.dict-controls .btn { flex: 1; }
+.dict.unsupported .voice-note, .voice-note.is-error { justify-content: flex-start; text-align: left; }
+.voice-note.is-error { color: var(--critical); font-weight: 600; }
+.voice-note .demo-tag { flex: none; }
+
+/* ---------- proposal sheet ---------- */
+.changes.on-sheet li { border: 1px solid var(--line); }
+.sheet .status-panel.s-critical p { margin: 4px 0 0; }
+.sheet .list-h { margin-top: 16px; }
+
+/* ---------- Focus Mode (inside the Focus Card; brief §11) ---------- */
+.method { margin-top: 14px; }
+.method-rec { background: var(--focus-panel); border-radius: var(--radius-md); padding: 12px; }
+.method-eyebrow { font-size: 12px; line-height: 16px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--focus-muted); }
+.method-rec h3 { color: var(--focus-ink); font-size: 18px; line-height: 24px; margin: 2px 0 4px; }
+.method-rec h3:focus { outline: none; }
+.method-rec p { margin: 4px 0 0; color: var(--focus-ink); }
+.method-structure { font-weight: 600; }
+.method-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 10px; }
+.method-opt {
+  text-align: left; min-height: var(--target); padding: 8px 10px; border-radius: var(--radius-md); cursor: pointer; font: inherit;
+  background: transparent; color: var(--focus-ink); border: 1px solid var(--focus-edge); display: flex; flex-direction: column; gap: 2px;
+  transition: transform .12s var(--ease-out), background-color .12s;
+}
+.method-opt:active { transform: scale(.97); }
+.method-opt.on { border: 2px solid var(--butter); background: var(--focus-panel); padding: 7px 9px; }
+.mo-name { font-weight: 600; font-size: 14px; line-height: 20px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.mo-name svg { width: 14px; height: 14px; color: var(--butter); }
+.mo-tag { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--on-butter); background: var(--butter); border-radius: var(--radius-pill); padding: 0 6px; }
+.mo-desc { font-size: 12px; line-height: 16px; color: var(--focus-muted); }
+.method-note { font-size: 13px; line-height: 18px; color: var(--focus-muted); margin: 10px 0 0; }
+.session { margin-top: 14px; }
+.session-method { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; background: var(--focus-panel); border-radius: var(--radius-md); padding: 8px 12px; font-size: 14px; }
+.session-method span { color: var(--focus-muted); font-size: 13px; }
+.session-steps { margin: 10px 0 0; padding-left: 22px; font-size: 14px; line-height: 22px; }
+.session-steps .num { color: var(--focus-muted); }
+.demo-skip { margin-top: 10px; background: none; border: 1px dashed var(--focus-edge); color: var(--focus-muted); border-radius: var(--radius-sm); padding: 6px 10px; min-height: var(--target); font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+.demo-skip .demo-tag { background: transparent; color: var(--focus-muted); border-color: var(--focus-edge); }
+.outcome { margin-top: 14px; }
+.outcome h3 { color: var(--focus-ink); font-size: 18px; line-height: 24px; }
+.outcome h3:focus { outline: none; }
+.outcome p { color: var(--focus-ink); margin: 6px 0; }
+.outcome-actions .btn { flex-basis: 30%; }
+.on-dark-label { color: var(--focus-ink); margin-top: 10px; }
+.focus .hrs-input { color: var(--focus-ink); margin-top: 4px; }
+.outcome .link { min-height: var(--target); margin-top: 6px; }
+.live-dot.is-still { animation: none; }
+
+/* ---------- weekly progress (brief §10): a bar and plain numbers, no streaks or badges ---------- */
+.week-pct { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; font-size: 15px; color: var(--forest); }
+.week-pct svg { width: 16px; height: 16px; }
+.week-bar span { animation: barGrow .6s var(--ease-out); }
+@keyframes barGrow { from { width: var(--from); } }
+.week-line { margin: 4px 0; color: var(--ink-2); }
+.week-line b { color: var(--ink); }
+.week.win .week-pct { animation: winPop .5s var(--ease-out); }
+@keyframes winPop { 0% { transform: scale(1); } 40% { transform: scale(1.18); } 100% { transform: scale(1); } }
+.session-log summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--forest); min-height: var(--target); display: flex; align-items: center; gap: 6px; list-style: none; }
+.session-log summary::-webkit-details-marker { display: none; }
+.session-log summary svg { width: 16px; height: 16px; transition: transform .12s; }
+.session-log[open] summary svg { transform: rotate(90deg); }
+.k-done.is-partial .tl-name { text-decoration: none; }
+
+/* ---------- baseline summary on the setup review ---------- */
+.baseline-sum h2 { font-size: 16px; line-height: 22px; margin-bottom: 4px; }
+.baseline-sum li > span svg { width: 14px; height: 14px; color: var(--harbor); vertical-align: -2px; margin-right: 6px; }
+/* Inputs inside the dark Focus Card keep the normal field colours (they would otherwise inherit the card's light text). */
+.focus input, .focus select { color: var(--ink); background: var(--surface); }

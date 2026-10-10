@@ -5,11 +5,15 @@
 (function () {
   'use strict';
   const T = window.TempoTime, E = window.TempoEngine, P = window.TempoParser, S = window.TempoStore, D = window.TempoData;
+  const F = window.TempoFocus, Assistant = window.TempoAssistant;
 
   let state = S.load();
   let undoSnap = null;
   const ui = {
-    tab: 'home', dayView: 'today', weekDay: null, sheet: null, toast: null, focusOnly: false, listening: null,
+    tab: 'home', dayView: 'today', weekDay: null, sheet: null, toast: null, focusOnly: false,
+    askThread: [],      // answered questions shown in the Ask SIKAD panel (this visit only)
+    dict: null,         // dictaphone state: { path, state, final, interim, note, error }
+    focusPick: null,    // session id while the student is choosing a working method
     ob: state.obDraft || freshOnboarding(),
   };
 
@@ -207,17 +211,39 @@
       if (again && again !== document.activeElement) again.focus({ preventScroll: true });
     }
     sheetWasOpen = !!ui.sheet;
+    if (state.onboarded) ui.prevPct = S.weeklyProgress(state).percent;
+    ui.celebrate = false;
     renderToast();
     tickTimer();
   }
   function renderToast() {
     $toast.innerHTML = ui.toast ? `<div class="toast" role="status"><span>${esc(ui.toast.msg)}</span>${ui.toast.undo && undoSnap ? ` <button data-action="undo">${ICON.undo}Undo</button>` : ''}</div>` : '';
   }
+  function tickDictation() {
+    const el = document.getElementById('dict-time');
+    if (!el || !ui.dict || ui.dict.state !== 'recording') return;
+    const secs = Math.floor((Date.now() - ui.dict.startedReal) / 1000);
+    el.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  }
+  setInterval(tickDictation, 500);
+
+  /** Once a second: refresh the session timer in place. A phase change or the timer ending triggers a re-render. */
+  let lastPhase = null;
   function tickTimer() {
+    const a = state.active;
     const el = document.getElementById('focus-timer');
-    if (!el || !state.active) return;
-    const secs = Math.max(0, Math.floor((Date.now() - state.active.realStartedAt) / 1000));
-    el.textContent = `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
+    if (!a || a.status !== 'running') { lastPhase = null; return; }
+    const t = F.timer(a, S.focusElapsedMs(a));
+    if (t.finished) {                      // timer ran out: ask the student; never complete or count anything automatically
+      S.pauseSession(state); a.status = 'awaiting'; lastPhase = null;
+      render();
+      const q = document.getElementById('outcome-title');
+      if (q) q.focus({ preventScroll: true });
+      return;
+    }
+    if (lastPhase !== null && lastPhase !== t.phase + t.round) { lastPhase = t.phase + t.round; render(); return; }
+    lastPhase = t.phase + (t.round || '');
+    if (el) el.textContent = F.clock(t.remainingMs == null ? t.elapsedMs : t.remainingMs);
   }
   setInterval(tickTimer, 1000);
 
@@ -369,7 +395,7 @@
     return `
       <h1 class="ob-title">Brain dump</h1>
       <p class="ob-sub">What's on your plate right now? Don't worry about formatting. Just dump it.</p>
-      ${micButton('ob.dumpText')}
+      ${dictaphone('ob.dumpText')}
       <label class="divider" for="dump-ob"><span>or type it out</span></label>
       <textarea id="dump-ob" rows="5" data-bind="ob.dumpText" placeholder="e.g. Database proposal due Friday, about 3 hours. Study for my math quiz on Wednesday…">${esc(ob.dumpText)}</textarea>
       <button class="demo-link" data-action="obSampleDump"><span class="demo-tag">DEMO</span> Use Alex's example</button>
@@ -389,14 +415,31 @@
   }).sort((x, y) => (y[0].askFirst ? 1 : 0) - (x[0].askFirst ? 1 : 0) || x[1] - y[1]);
   const estLegend = () => `<p class="legend small"><span class="est-dur">≈ 2 hrs</span> <span class="chip est">AI estimate</span> means SIKAD guessed the time from the task type. Change it if you know better.</p>`;
 
+  /** The confirmed baseline, shown again before the first plan so it can be corrected (brief Stage 3). */
+  function baselineSummary() {
+    const b = state.baseline;
+    const ftf = [...new Set(b.classes.filter((c) => c.mode === 'FTF').map((c) => c.day))].sort().map((d) => T.DAY_SHORT[d]);
+    return `
+      <section class="card baseline-sum" aria-labelledby="bs-title">
+        <h2 id="bs-title">Your baseline</h2>
+        <ul class="plain">
+          <li><span>${ICON.lock}<b>${b.classes.length} weekly class${b.classes.length === 1 ? '' : 'es'}</b> (fixed)${ftf.length ? ` · face-to-face on ${ftf.join(', ')}` : ''}</span><button class="btn small" data-action="obGoto" data-step="1" aria-label="Edit classes">Edit</button></li>
+          <li><span class="num"><b>Planning day</b> ${T.hmLabel(b.dayStart)}–${T.hmLabel(b.dayEnd)} · commute ${b.commuteMins ? T.dur(b.commuteMins) : 'none'} · 15 min buffer around tasks</span><button class="btn small" data-action="obGoto" data-step="2" aria-label="Edit routine">Edit</button></li>
+          <li><span class="num">${b.recurring.length ? b.recurring.map((r) => `${ICON.lock}<b>${esc(r.title)}</b> every ${T.DAY_SHORT[r.day]} ${T.hmLabel(r.start)}–${T.hmLabel(r.end)}`).join('<br>') : 'No other weekly commitments'}</span><button class="btn small" data-action="obGoto" data-step="2" aria-label="Edit weekly commitments">Edit</button></li>
+        </ul>
+      </section>`;
+  }
+
   function obReview() {
     const items = ui.ob.review;
     const tasks = items.filter((it) => it.kind === 'task');
     const skipped = items.filter((it) => it.kind !== 'task' && !['stress', 'unclear', 'duplicate'].includes(it.kind)).length;
     const unclear = items.find((it) => it.kind === 'unclear');
     return `
-      <h1 class="ob-title">Here's what I caught</h1>
-      <p class="ob-sub">Check each one before anything is scheduled.</p>
+      <h1 class="ob-title">Review before planning</h1>
+      <p class="ob-sub">Check your baseline and each task. Nothing is scheduled until you generate the plan.</p>
+      ${baselineSummary()}
+      <h2 class="list-h">Tasks I caught (${tasks.length})</h2>
       ${tasks.some((t) => t.task.isAiEstimate) ? estLegend() : ''}
       <div class="review-list">${answerFirst(items).map(([it, n]) => it.kind === 'task' ? taskReviewCard(it, `ob.review.${n}`, n, 'ob') : '').join('')}</div>
       ${!tasks.length ? (unclear
@@ -424,11 +467,45 @@
       </div>`;
   }
 
-  function micButton(bindPath) {
-    const on = ui.listening === bindPath;
-    return `<button class="mic ${on ? 'listening' : ''}" data-action="voice" data-path="${bindPath}" aria-label="${on ? 'Stop listening' : 'Tap to speak'}" aria-pressed="${on}">${ICON.mic}</button>
-      <div class="mic-label" aria-live="polite">${on ? 'Listening… tap to stop' : 'Tap to speak'}</div>
-      ${ui.voiceNote ? `<p class="voice-note">${ICON.info}<span>Voice input isn't supported in this browser. Type it below instead.</span></p>` : ''}`;
+  // ------------------------------------------------------------ dictaphone --
+  // Voice capture (brief §7): ready → recording (Stop / Cancel) → transcript lands in the
+  // editable text field → the same review/confirm workflow as typed input. It only
+  // captures and transcribes; interpreting and replanning happen elsewhere. No audio is
+  // stored or uploaded by SIKAD: the browser's own speech recognition does the work.
+  const speechSupported = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const VOICE_ERRORS = {
+    'not-allowed': 'Microphone access was blocked. Allow it in your browser\'s site settings, or type instead.',
+    'service-not-allowed': 'Microphone access was blocked. Allow it in your browser\'s site settings, or type instead.',
+    network: 'The browser\'s speech service could not be reached. It needs an internet connection. You can type instead.',
+    'no-speech': 'No speech was heard. Try again a little closer to the microphone, or type instead.',
+    'audio-capture': 'No microphone was found. Connect one, or type instead.',
+  };
+  function dictaphone(path) {
+    const d = ui.dict && ui.dict.path === path ? ui.dict : null;
+    if (d && d.state === 'recording') {
+      return `<div class="dict recording">
+        <div class="dict-status" role="status"><span class="rec-dot" aria-hidden="true"></span><b>Recording</b><span id="dict-time" class="num">0:00</span></div>
+        <p id="dict-interim" class="dict-interim" aria-live="polite">${esc(d.final + d.interim) || 'Listening…'}</p>
+        <div class="row dict-controls"><button class="btn" data-action="dictStop">Stop and use text</button><button class="btn ghost" data-action="dictCancel">Cancel</button></div>
+      </div>`;
+    }
+    const note = d && d.note === 'transcribed' ? `<p class="voice-note">${ICON.check}<span>Transcribed by your browser. Check the text below before sending.</span></p>`
+      : d && d.note === 'demo' ? `<p class="voice-note"><span class="demo-tag">DEMO</span><span>Sample transcript inserted. It did not come from your microphone.</span></p>`
+      : d && d.note === 'cancelled' ? `<p class="voice-note">${ICON.info}<span>Recording cancelled. Nothing was added.</span></p>`
+      : d && d.error ? `<p class="voice-note is-error" role="alert">${ICON.alert}<span>${esc(d.error)}</span></p>` : '';
+    if (!speechSupported()) {
+      return `<div class="dict unsupported">
+        <p class="voice-note">${ICON.info}<span>Voice capture needs a browser with speech recognition (Chrome or Edge). This browser does not have it, so type below instead.</span></p>
+        <button class="demo-link" data-action="dictDemo" data-path="${path}"><span class="demo-tag">DEMO</span> Insert a sample transcript</button>
+        ${note}
+      </div>`;
+    }
+    return `<div class="dict ready">
+      <button class="mic" data-action="dictStart" data-path="${path}" aria-label="Start recording">${ICON.mic}</button>
+      <div class="mic-label">Start recording</div>
+      ${note}
+      ${d && d.error ? `<button class="demo-link" data-action="dictDemo" data-path="${path}"><span class="demo-tag">DEMO</span> Insert a sample transcript</button>` : ''}
+    </div>`;
   }
   /**
    * Show a validation error directly under its field, link it with aria-describedby,
@@ -466,6 +543,7 @@
           <label class="toggle"><input type="checkbox" ${it.include ? 'checked' : ''} data-bind="${path}.include" data-rerender> Add to plan</label>
         </div>
         ${t.context ? `<div class="rc-context">${esc(t.context)}</div>` : ''}
+        ${t.dependsOnTitle ? `<p class="small rc-note">${ICON.chevron}Starts after: <b>${esc(t.dependsOnTitle)}</b> is finished.</p>` : ''}
         ${it.ambiguous ? `<div class="clarify" tabindex="-1" data-question>${ICON.question}<div><p id="${qid}"><b>${esc(it.clarification)}</b></p>
           <div class="chips" role="radiogroup" aria-labelledby="${qid}">${it.ambiguous.map((o, k) =>
             `<button class="chip-btn" role="radio" aria-checked="false" data-action="pickAmbiguous" data-scope="${scope}" data-n="${n}" data-k="${k}">${esc(o.label)}</button>`).join('')}</div></div></div>`
@@ -498,7 +576,7 @@
         <nav class="bottom-nav" aria-label="Main">
           ${navBtn('home', 'Home', ICON.home)}
           ${navBtn('week', 'Overview', ICON.week)}
-          <button class="fab" data-action="openDump" aria-label="Brain dump: add a task or a change"><span class="fab-circle">${ICON.braindump}</span><span class="fab-label">Brain dump</span></button>
+          <button class="fab" data-action="openDump" aria-label="Ask SIKAD: ask about your plan, add a task or report a change"><span class="fab-circle">${ICON.braindump}</span><span class="fab-label">Ask SIKAD</span></button>
           ${navBtn('tasks', 'Tasks', ICON.tasks)}
           ${navBtn('profile', 'Profile', ICON.user)}
         </nav>
@@ -534,6 +612,7 @@
       ${checkinCards()}
       ${focusCard()}
       <div id="attention" tabindex="-1">${attentionBlock()}</div>
+      ${weekCard()}
       ${fitCard()}
       <section class="section">
         <div class="section-head">
@@ -553,10 +632,12 @@
     const n = now();
     const when = (x) => `${T.rel(x.start, n)} ${T.timeShort(x.start)}`;
     let detail = '';
-    if (c.action === 'RESCHEDULE') detail = `<s><span class="sr-only">was </span>${when(c.from)}</s> <span aria-hidden="true">→</span><span class="sr-only">now</span> <b>${when(c.to)}</b>`;
+    const resized = c.action === 'RESCHEDULE' && c.from.start === c.to.start;
+    if (resized) detail = `<b>${when(c.to)}</b> · now ${T.dur(c.to.mins)}`;
+    else if (c.action === 'RESCHEDULE') detail = `<s><span class="sr-only">was </span>${when(c.from)}</s> <span aria-hidden="true">→</span><span class="sr-only">now</span> <b>${when(c.to)}</b>`;
     else if (c.action === 'SCHEDULE') detail = `<b>${when(c.to)}</b>`;
     else if (c.action === 'UNSCHEDULED') detail = 'see "Not enough time" below';
-    return `<span class="ch-title">${esc(c.title)}</span><span class="ch-detail num">${detail}</span><span class="chip ch-${c.action.toLowerCase()}">${ACTION_WORD[c.action] || c.action}</span>`;
+    return `<span class="ch-title">${esc(c.title)}</span><span class="ch-detail num">${detail}</span><span class="chip ch-${c.action.toLowerCase()}">${resized ? 'Resized' : ACTION_WORD[c.action] || c.action}</span>`;
   }
 
   function updateCard() {
@@ -605,7 +686,7 @@
       const stuck = pendingTasks.length > 0;
       return `<section class="focus empty" aria-labelledby="focus-title"><div class="focus-label">${ICON.step}<span>What to do next</span></div>
         <h2 id="focus-title" tabindex="-1">${stuck ? 'Nothing fits right now' : "You're all clear."}</h2>
-        <p>${stuck ? 'Some tasks need a deadline or more time. <a class="link on-dark-link" href="#attention">See what needs attention</a>.' : 'No pending tasks. Tap Brain dump when something new comes up.'}</p></section>`;
+        <p>${stuck ? 'Some tasks need a deadline or more time. <button class="link on-dark-link" data-action="scrollAttention">See what needs attention</button>.' : 'No pending tasks. Open Ask SIKAD when something new comes up.'}</p></section>`;
     }
     const task = taskById(next.taskId);
     const [main, part] = next.title.split(' — ');
@@ -618,24 +699,107 @@
     const durLabel = task && task.isAiEstimate ? `<span class="est-dur">≈ ${T.dur(next.mins)}</span>` : T.dur(next.mins);
     return `
       <section class="focus ${active ? 'active' : ''}" aria-labelledby="focus-title">
-        <div class="focus-label">${active ? '<span class="live-dot" aria-hidden="true"></span><span>In progress</span>' : `${ICON.step}<span>What to do next</span>`}</div>
+        <div class="focus-label">${active ? `<span class="live-dot ${state.active.status === 'running' ? '' : 'is-still'}" aria-hidden="true"></span><span>${state.active.status === 'paused' ? 'Paused' : state.active.status === 'awaiting' ? 'Session ended' : 'In progress'}</span>` : `${ICON.step}<span>What to do next</span>`}</div>
         ${nowFixed && !active ? `<div class="focus-now">${ICON.lock}<span>Right now: ${esc(nowFixed.title)} until <span class="num">${T.timeShort(nowFixed.end)}</span></span></div>` : ''}
         <h2 id="focus-title" tabindex="-1">${!active && startsNow && !STARTS_WITH_VERB.test(main) ? 'Start ' : ''}${esc(main)}</h2>
         ${part ? `<div class="focus-part">— ${esc(part)}</div>` : ''}
         <div class="focus-time num">${ICON.clock}<span><span class="nowrap">${T.rel(next.start, n)} · ${T.range(next.start, next.end)}</span> · <span class="nowrap">${durLabel}</span></span></div>
         <div class="focus-tags">${task && task.context ? `<span class="chip">${esc(task.context)}</span>` : ''}${task ? priChip(task.priority) : ''}${sessionTag}${longTag}${task && task.isAiEstimate ? estChip() : ''}</div>
         ${beforeNext && !active ? `<div class="focus-before">${ICON.lock}<span>Before that: ${esc(beforeNext.title)} · <span class="num">${T.range(beforeNext.start, beforeNext.end)}</span></span></div>` : ''}
-        ${why ? `<div class="why"><b>Why this?</b> ${esc(why)}</div>` : ''}
-        ${active ? `
-          <div class="timer-row"><span id="focus-timer" class="num" role="timer" aria-label="Time since you started">00:00</span><span class="timer-note">since you started</span></div>
-          <div class="focus-actions"><button class="btn primary" data-action="done" data-id="${next.id}">${ICON.check} Mark done</button><button class="btn on-dark" data-action="snooze" data-id="${next.id}" aria-label="Didn't finish: move the rest to your next open block">Didn't finish</button></div>`
-        : `
+        ${active ? focusActive(next, task) : ui.focusPick === next.id ? focusPicker(next, task) : `
+          ${why ? `<div class="why"><b>Why this?</b> ${esc(why)}</div>` : ''}
           <div class="focus-actions">
             <button class="btn primary" data-action="start" data-id="${next.id}">${ICON.play} Start task</button>
             <button class="btn on-dark" data-action="done" data-id="${next.id}" aria-label="Done: mark ${esc(next.title)} complete">${ICON.check} Done</button>
             <button class="btn on-dark" data-action="snooze" data-id="${next.id}" aria-label="Snooze: move to your next open block">Snooze</button>
           </div>`}
       </section>`;
+  }
+
+  // ------------------------------------------------------------ Focus Mode --
+  /** Facts the working-method suggestion is based on (all read from the current plan). */
+  function focusContext(session, task) {
+    const n = now();
+    const ref = Math.max(n, session.start);
+    const day = T.dayStart(ref);
+    const busy = E.occurrences(state, day).filter((o) => o.start > ref).sort((x, y) => x.start - y.start)[0];
+    const dayEnd = T.at(day, state.baseline.dayEnd);
+    const windowEnd = busy ? busy.start - state.baseline.bufferMins * T.MIN : dayEnd;
+    const nextFixed = E.occurrences(state, day).filter((o) => !o.soft && o.start >= session.end).sort((x, y) => x.start - y.start)[0] || null;
+    return {
+      sessionMins: session.mins, windowMins: Math.max(0, Math.round((windowEnd - ref) / T.MIN)),
+      remainingTaskMins: task ? S.taskRemaining(task) : session.mins, taskType: task ? task.type : 'task', nextFixed,
+      pendingSteps: task ? task.parts.filter((p) => !p.done).map((p) => ({ title: p.title, mins: p.remainingMins })) : [],
+    };
+  }
+
+  /** Step 1 of Focus Mode: suggest a working method, explain why, and let the student pick another or none. */
+  function focusPicker(session, task) {
+    const rec = F.recommend(focusContext(session, task));
+    const chosen = ui.focusMethod || rec.method;
+    const last = state.prefs.focusMethod;
+    return `
+      <div class="method" role="group" aria-labelledby="method-title">
+        <div class="method-rec">
+          <div class="method-eyebrow">Suggested way to work</div>
+          <h3 id="method-title">${esc(rec.name)}</h3>
+          <p>${esc(rec.reason)}</p>
+          <p class="num method-structure">${esc(rec.structure)}</p>
+        </div>
+        <div class="method-options" role="radiogroup" aria-label="Working method">
+          ${rec.options.map((o) => `<button class="method-opt ${chosen === o.method ? 'on' : ''}" role="radio" aria-checked="${chosen === o.method}" data-action="focusMethod" data-v="${o.method}">
+            <span class="mo-name">${chosen === o.method ? ICON.check : ''}${esc(o.name)}${o.recommended ? ' <span class="mo-tag">Suggested</span>' : ''}${last === o.method && !o.recommended ? ' <span class="mo-tag">Last used</span>' : ''}</span>
+            <span class="mo-desc num">${esc(o.structure)}</span></button>`).join('')}
+        </div>
+        <p class="method-note">A suggestion from this session's length and your schedule. Pick whatever suits you.</p>
+        <div class="focus-actions">
+          <button class="btn primary" data-action="focusBegin" data-id="${session.id}">${ICON.play} Start session</button>
+          <button class="btn on-dark" data-action="focusCancel">Back</button>
+        </div>
+      </div>`;
+  }
+
+  /** Step 2: the running session (timer, Pause/Resume, End), then the "is it complete?" question. */
+  function focusActive(session, task) {
+    const a = state.active;
+    const t = F.timer(a, S.focusElapsedMs(a));
+    const m = F.METHODS[a.method] || F.METHODS.none;
+    if (a.status === 'awaiting') {
+      const partial = ui.focusPartial;
+      const guess = Math.max(15, Math.round(Math.max(0, session.mins - t.focusedMins) / 15) * 15);
+      return `
+        <div class="outcome" role="group" aria-labelledby="outcome-title">
+          <h3 id="outcome-title" tabindex="-1">Is this piece of work complete?</h3>
+          <p>${t.finished ? 'The timer finished. ' : ''}You focused for <b class="num">${T.dur(Math.max(1, t.focusedMins))}</b> using ${esc(m.name.toLowerCase())}. A finished timer does not mark the task done. You decide.</p>
+          ${partial ? `
+            <label class="on-dark-label" for="focus-left">Time still needed for ${esc(session.title.split(' — ').pop())}</label>
+            <span class="hrs-input"><input id="focus-left" type="number" min="0.25" step="0.25" value="${hrs(guess)}"> hrs</span>
+            <div class="focus-actions">
+              <button class="btn primary" data-action="focusSavePartial">Save and replan</button>
+              <button class="btn on-dark" data-action="focusPartialBack">Back</button>
+            </div>` : `
+            <div class="focus-actions outcome-actions">
+              <button class="btn primary" data-action="focusOutcome" data-v="complete">${ICON.check} Yes, it's complete</button>
+              <button class="btn on-dark" data-action="focusOutcome" data-v="partial">Partly done</button>
+              <button class="btn on-dark" data-action="focusOutcome" data-v="unfinished">Not yet</button>
+            </div>
+            <button class="link on-dark-link" data-action="focusKeepWorking">Keep working instead</button>`}
+        </div>`;
+    }
+    const steps = a.method === 'chunking' && a.steps ? a.steps : null;
+    const paused = a.status === 'paused';
+    return `
+      <div class="session">
+        <div class="session-method"><b>${esc(m.name)}</b><span id="focus-phase">${esc(paused ? 'Paused' : t.label)}</span></div>
+        <div class="timer-row"><span id="focus-timer" class="num" role="timer" aria-label="${t.remainingMs == null ? 'Time focused' : 'Time left'}">${F.clock(t.remainingMs == null ? t.elapsedMs : t.remainingMs)}</span>
+          <span class="timer-note">${t.remainingMs == null ? 'focused so far' : t.phase === 'break' ? 'of break left' : 'left'}</span></div>
+        ${steps ? `<ol class="session-steps">${steps.map((st) => `<li>${esc(st.title)} <span class="num">${T.dur(st.mins)}</span></li>`).join('')}</ol>` : ''}
+        <div class="focus-actions">
+          ${paused ? `<button class="btn primary" data-action="focusResume">${ICON.play} Resume</button>` : `<button class="btn primary" data-action="focusPause">Pause</button>`}
+          <button class="btn on-dark" data-action="focusEnd">End session</button>
+        </div>
+        <button class="demo-skip" data-action="focusSkip" data-mins="5"><span class="demo-tag">DEMO</span> Skip ahead 5 min</button>
+      </div>`;
   }
 
   /** Engine statuses that need the student (design.md §8): ERROR, needs-deadline, INFEASIBLE, warnings, info. */
@@ -687,6 +851,32 @@
     const infos = (state.alerts || []).filter((a) => a.level === 'INFO');
     if (infos.length) out.push(`<section class="status-panel s-info">${ICON.info}<div>${infos.map((w) => `<p>${esc(w.message)}</p>`).join('')}</div></section>`);
     return out.join('');
+  }
+
+  /**
+   * Weekly progress (brief §10). Metric, from S.weeklyProgress: work credited this week
+   * against work credited + still planned this week (Mon–Sun). Rescheduling changes the
+   * plan side only. No streaks, points or badges.
+   */
+  function weekCard() {
+    const w = S.weeklyProgress(state);
+    const outcomeWord = { complete: 'Completed', partial: 'Partly done', unfinished: 'Not finished yet' };
+    const nextWeekMins = state.plan.filter((x) => x.start >= w.weekEnd).reduce((a, x) => a + x.mins, 0);
+    const from = ui.prevPct == null ? w.percent : ui.prevPct;
+    const sessions = state.focusLog.slice(-5).reverse();
+    const win = ui.celebrate;
+    return `
+      <section class="card week ${win ? 'win' : ''}" aria-labelledby="week-title">
+        <div class="fit-head"><h2 id="week-title">This week</h2>${w.totalMins ? `<span class="week-pct num">${win ? ICON.check : ''}${w.percent}%</span>` : ''}</div>
+        ${w.totalMins ? `
+          <div class="bar week-bar" role="img" aria-label="${T.dur(w.doneMins)} done of ${T.dur(w.totalMins)} planned this week"><span style="--from:${from}%;width:${w.percent}%"></span></div>
+          <p class="small num week-line"><b>${T.dur(w.doneMins)}</b> done of <b>${T.dur(w.totalMins)}</b> planned this week${w.tasksDone ? ` · <b>${w.tasksDone}</b> task${w.tasksDone === 1 ? '' : 's'} finished` : ''}</p>`
+        : `<p class="small week-line">No work is planned for the rest of this week${nextWeekMins ? `. Next week has <b class="num">${T.dur(nextWeekMins)}</b> planned` : ''}.</p>`}
+        <p class="small num week-line"><b>${w.focusSessions}</b> focus session${w.focusSessions === 1 ? '' : 's'} this week${w.focusedMins ? ` · ${T.dur(w.focusedMins)} focused` : ''}</p>
+        <p class="small muted">Done work compared with what is planned for Monday to Sunday right now. Moving work to another day changes the plan, not your progress.</p>
+        ${sessions.length ? `<details class="session-log"><summary>${ICON.chevron}Recent focus sessions (${state.focusLog.length})</summary>
+          <ul class="plain small num">${sessions.map((f) => `<li><span><b>${esc(f.title)}</b><br>${T.short(f.at)} · ${esc((F.METHODS[f.method] || F.METHODS.none).name)} · ${T.dur(Math.max(1, f.focusedMins))} focused · ${outcomeWord[f.outcome] || f.outcome}</span></li>`).join('')}</ul></details>` : ''}
+      </section>`;
   }
 
   /** "Does it all fit?" — optional workload visual (story §22), kept below the Focus Card (design.md §7.7). */
@@ -842,7 +1032,7 @@
       <button class="btn block" data-action="newTask">${ICON.plus} Add a task manually</button>
       ${attention.length ? `<h2 class="list-h">Needs attention</h2>${attention.map(taskCard).join('')}` : ''}
       ${upcoming.length ? `<h2 class="list-h">Up next</h2>${upcoming.map(taskCard).join('')}` : ''}
-      ${!open.length ? '<p class="muted empty-tl">No open tasks. Tap Brain dump to add one.</p>' : ''}
+      ${!open.length ? '<p class="muted empty-tl">No open tasks. Open Ask SIKAD to add one.</p>' : ''}
       ${done.length ? `<details class="done-list"><summary>Completed (${done.length})</summary>${done.map(taskCard).join('')}</details>` : ''}`;
   }
 
@@ -936,7 +1126,7 @@
         <div class="list-head"><h2>Under the hood</h2><span class="demo-tag">DEMO</span></div>
         <p class="small">Every extraction and replan produces the JSON contract from prompt.md (Phase 1–3).</p>
         <button class="btn block" data-action="openEngine">View engine output (JSON)</button>
-        <button class="btn block" data-action="loadDemoConfirm">Reload Alex's demo week</button>
+        <button class="btn block" data-action="loadDemoConfirm">Reset demo to the initial scenario</button>
       </section>
 
       <section class="card settings">
@@ -955,33 +1145,52 @@
   // ================================================================ SHEETS ==
   function sheet() {
     const sh = ui.sheet;
-    const inner = { dump: dumpSheet, task: taskSheet, fixed: fixedSheet, clock: clockSheet, engine: engineSheet }[sh.type]();
+    const inner = { dump: dumpSheet, proposal: proposalSheet, task: taskSheet, fixed: fixedSheet, clock: clockSheet, engine: engineSheet }[sh.type]();
     return `<div class="sheet-backdrop" data-action="backdrop"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
       <div class="sheet-grip" aria-hidden="true"></div><button class="icon-btn sheet-close" data-action="closeSheet" aria-label="Close">${ICON.close}</button>${inner}</div></div>`;
   }
 
   // ---------- Brain dump (capture + review) ----------
+  /** One answered question in the Ask SIKAD thread. The answer text comes from js/assistant.js. */
+  function askEntry(e, i, lastIdx) {
+    const a = e.a;
+    return `<div class="ask-item">
+      <p class="ask-q"><span class="sr-only">You asked: </span>${esc(e.q)}</p>
+      <div class="ask-a ${a.missing ? 'is-missing' : ''}" ${i === lastIdx ? 'id="ask-latest" tabindex="-1"' : ''}>
+        <h3>${esc(a.title)}</h3>
+        ${a.lines.map((l) => `<p>${esc(l)}</p>`).join('')}
+        ${a.facts.length ? `<dl class="ask-facts num">${a.facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>` : ''}
+      </div>
+    </div>`;
+  }
+
+  /** Ask SIKAD (brief §8): a supporting panel for questions and updates, not a full-screen chat. */
   function dumpSheet() {
     const sh = ui.sheet;
     if (sh.mode === 'review') return dumpReview();
     const form = sh.input === 'form';
+    const thread = ui.askThread.slice(-2);
     return `
-      <h2 id="sheet-title"><span class="title-icon">${ICON.braindump}</span>Brain dump</h2>
-      <p class="sheet-sub">New task, schedule change, cancelled meeting, didn't finish something? Say it or type it.</p>
+      <h2 id="sheet-title"><span class="title-icon">${ICON.braindump}</span>Ask SIKAD</h2>
+      <p class="sheet-sub">Ask about your plan, add a task, or say what changed. Nothing in your plan changes until you confirm it.</p>
+      ${thread.length ? `<div class="ask-thread" aria-label="Recent answers">${thread.map((e, i) => askEntry(e, i, thread.length - 1)).join('')}</div>` : ''}
       <div class="tabs" role="tablist" aria-label="Input method">
         <button role="tab" aria-selected="${!form}" class="${!form ? 'on' : ''}" data-action="dumpInput" data-v="text">Speak or type</button>
         <button role="tab" aria-selected="${form}" class="${form ? 'on' : ''}" data-action="dumpInput" data-v="form">Form</button>
       </div>
       ${form ? manualForm() : `
-        ${micButton('sheet.text')}
-        <label class="divider" for="dump-text"><span>or type it out</span></label>
-        <textarea id="dump-text" rows="4" data-bind="sheet.text" placeholder="e.g. My boss asked me to cover a shift from 5 to 9 PM tonight">${esc(sh.text || '')}</textarea>
+        ${dictaphone('sheet.text')}
+        <label class="divider" for="dump-text"><span>or type it</span></label>
+        <textarea id="dump-text" rows="3" data-bind="sheet.text" placeholder="e.g. How much usable time do I have tomorrow?">${esc(sh.text || '')}</textarea>
         ${sh.restored ? '<p class="small muted">Picked up the text you left here.</p>' : ''}
-        <button class="btn primary block" data-action="processDump">Update my plan</button>
+        <button class="btn primary block" data-action="processDump">Send</button>
+        <div class="ask-examples"><p class="small" id="ask-ex">Try asking</p>
+          <div class="chips" aria-labelledby="ask-ex">${D.QUESTIONS.map((q, i) => `<button class="chip-btn" data-action="askExample" data-i="${i}">${esc(q)}</button>`).join('')}</div></div>
         <details class="scenarios" open>
           <summary><span class="demo-tag">DEMO</span> Demo scenarios</summary>
           <div class="chips">${D.SCENARIOS.map((sc, i) => `<button class="chip-btn" data-action="scenario" data-i="${i}">${esc(sc.label)}</button>`).join('')}</div>
-        </details>`}`;
+        </details>
+        <p class="small muted">Answers are worked out from your current plan using fixed rules. No AI model is connected in this demo.</p>`}`;
   }
 
   function manualForm() {
@@ -1010,7 +1219,7 @@
       <div class="sheet-actions">
         ${blocking ? `<p class="nav-reason" id="apply-reason">${esc(blocking)}</p>` : ''}
         <button class="btn ghost" data-action="dumpEdit">Edit text</button>
-        ${actionable ? `<button class="btn primary" data-action="applyDump" ${blocking ? 'disabled aria-describedby="apply-reason"' : ''}>Apply to my plan</button>` : '<button class="btn primary" data-action="closeSheet">Done</button>'}
+        ${actionable ? `<button class="btn primary" data-action="applyDump" ${blocking ? 'disabled aria-describedby="apply-reason"' : ''}>See plan changes</button>` : '<button class="btn primary" data-action="closeSheet">Done</button>'}
       </div>`;
   }
 
@@ -1021,6 +1230,7 @@
       if (it.kind === 'recurring' && it.conflicts.length && !it.resolution) return 'Choose how to handle the conflict first.';
       if (it.kind === 'contradiction' && !it.answer) return 'Answer the question above first.';
       if (it.kind === 'refuse' && it.addAsTask && it.deadline == null) return 'Add a due date so I can schedule the steps.';
+      if (it.kind === 'partial' && !(it.remainingMins > 0)) return 'Enter how much time is still needed.';
     }
     return '';
   }
@@ -1044,6 +1254,18 @@
     const n0 = now();
     switch (it.kind) {
       case 'task': return taskReviewCard(it, p, n, 'sheet');
+      case 'extend': {
+        const t = taskById(it.taskId); const left = t ? S.taskRemaining(t) : 0;
+        return `<article class="review-card">${rcKind(ICON.clock, 'More time needed')}<p class="num"><b>${esc(it.title)}</b>: ${T.dur(left)} left → <b>${T.dur(left + it.addMins)} left</b> (+${T.dur(it.addMins)})</p>
+          <p class="small rc-note">The plan will be recalculated around your fixed commitments. If it no longer fits before the deadline, SIKAD will say so.</p></article>`;
+      }
+      case 'complete_part':
+        return `<article class="review-card">${rcKind(ICON.check, 'Part finished', 'k-success')}<p><b>${esc(it.title)} — ${esc(it.partTitle)}</b> will be marked done. The rest of the task stays on your plan.</p></article>`;
+      case 'partial': {
+        const t = taskById(it.taskId); const left = t ? S.taskRemaining(t) : 0;
+        return `<article class="review-card">${rcKind(ICON.check, 'Part finished', 'k-success')}<p><b>${esc(it.title)}</b> has no named steps, so tell me what is left. It currently shows ${T.dur(left)}.</p>
+          <label class="${it.remainingMins > 0 ? '' : 'needs-answer'}">Time still needed<span class="hrs-input"><input type="number" min="0.25" step="0.25" value="${it.remainingMins > 0 ? hrs(it.remainingMins) : ''}" data-bind="${p}.remainingMins" data-type="hrs" data-rerender> hrs</span></label></article>`;
+      }
       case 'event': {
         const e = it.event;
         const hard = it.conflicts.hard;
@@ -1140,16 +1362,20 @@
     ui.sheet = { type: 'dump', mode: 'review', text, items };
   }
 
-  function applyDump() {
-    const sh = ui.sheet;
-    snapshot('Brain dump');
+  /** Apply the confirmed items to the CURRENT `state` and replan. Returns false when there is nothing to do. */
+  function applyItems(items) {
     const triggers = [], notes = [];
-    for (const it of sh.items) {
+    for (const it of items) {
       if (!it.include) continue;
       const t = it.taskId ? taskById(it.taskId) : null;
       switch (it.kind) {
         case 'task': {
           const task = S.makeTask(state, it.task);
+          if (it.task.dependsOnTitle && !task.dependencies.length) {
+            const dep = state.tasks.find((x) => x.title === it.task.dependsOnTitle && x.status !== 'done' && x.status !== 'cancelled');
+            if (dep) task.dependencies = [dep.id];
+            else notes.push(`I could not link "${task.title}" to "${it.task.dependsOnTitle}". You can set that in the task's details.`);
+          }
           state.tasks.push(task);
           triggers.push(`New task: ${task.title}`);
           if (task.deadline == null) notes.push(`"${task.title}" is saved but won't be scheduled until it has a deadline.`);
@@ -1178,15 +1404,10 @@
           triggers.push(`Cancelled ${it.occurrences.map((o) => o.title).join(', ')} (${T.short(it.occurrences[0].start)})`);
           break;
         case 'cancel_task': if (t) { t.status = 'cancelled'; triggers.push(`Removed task: ${t.title}`); } break;
-        case 'complete':
-          if (t) {
-            t.status = 'done';
-            (t.parts || []).forEach((x) => { x.done = true; x.remainingMins = 0; });
-            t.remainingMins = 0;
-            state.history.push({ id: `${t.id}@${now()}`, taskId: t.id, title: t.title, start: now(), end: now(), doneAt: now() });
-            triggers.push(`Completed: ${t.title}`);
-          }
-          break;
+        case 'complete': if (t) { S.completeTask(state, t.id); triggers.push(`Completed: ${t.title}`); } break;
+        case 'complete_part': if (t) { S.completePart(state, t.id, it.partId); triggers.push(`Finished: ${t.title} — ${it.partTitle}`); } break;
+        case 'partial': if (t) { S.setTaskRemaining(state, t.id, it.remainingMins); triggers.push(`Partly done: ${t.title} (${T.dur(S.taskRemaining(t))} left)`); } break;
+        case 'extend': if (t) { S.extendTask(state, t.id, it.addMins); triggers.push(`More time for ${t.title} (+${T.dur(it.addMins)})`); } break;
         case 'missed':
           if (t) {
             t.notBefore = now();
@@ -1210,12 +1431,50 @@
         default: break;
       }
     }
-    if (!triggers.length && !notes.length) { ui.sheet = null; render(); return; }
+    if (!triggers.length && !notes.length) return false;
     S.replan(state, triggers.join(' · ') || 'Brain dump', { notes });
-    ui.dumpDraft = null;
-    ui.sheet = null; ui.tab = 'home'; ui.focusOnly = false;
+    return true;
+  }
+
+  /**
+   * Student control (brief §3D, Stage 6): the confirmed input is applied to a COPY of the
+   * state and replanned there. The student then sees the proposed plan changes and accepts
+   * or rejects them. The real state (and what is saved) only changes on Accept.
+   */
+  function applyDump() {
+    const sh = ui.sheet;
+    const committed = state;
+    let draft = null, changed = false;
+    state = S.clone(committed);
+    try { changed = applyItems(sh.items); draft = state; } finally { state = committed; }
+    if (!changed) { ui.sheet = null; render(); return; }
+    committed.engineLog = draft.engineLog.slice(); // the engine produced this output; keep it inspectable even if rejected
+    ui.sheet = { type: 'proposal', draft, review: sh };
     render();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function proposalSheet() {
+    const d = ui.sheet.draft, u = d.lastUpdate, n = d.now;
+    const next = E.nextSession(d.plan, n);
+    const short = d.status === 'INFEASIBLE';
+    const crit = (d.alerts || []).find((x) => x.level === 'CRITICAL');
+    const skipped = /cancel|skip/i.test(u.trigger + ' ' + u.notes.join(' '));
+    return `
+      <h2 id="sheet-title" tabindex="-1">Review the updated plan</h2>
+      <p class="sheet-sub">This is a proposal. Nothing is saved until you accept it.</p>
+      <p class="small">Because: ${esc(u.trigger)}</p>
+      ${u.notes.map((x) => `<p class="small">${esc(x)}</p>`).join('')}
+      <h3 class="list-h">What would change</h3>
+      ${u.changes.length ? `<ul class="changes on-sheet">${u.changes.map((c) => `<li>${changeLine(c)}</li>`).join('')}</ul>` : '<p class="small">No other task needs to move.</p>'}
+      ${short ? `<div class="status-panel s-critical" role="status">${ICON.hourglass}<div><b>Not enough time</b><p>${esc(crit ? crit.message : 'Some work would not fit before its deadline.')}</p>
+        <p>Not fitting: ${(d.unscheduled || []).map((x) => `${esc(x.title)} (${T.dur(x.mins)})`).join(', ')}. No deadline or duration was changed to hide this.</p></div></div>` : ''}
+      <p class="small upd-fixed">${ICON.lock}<span>Fixed commitments unchanged${skipped ? ', except the one you chose to cancel or skip' : ''}.</span></p>
+      ${next ? `<p class="small upd-next">${ICON.step}<span>Next would be: <b>${esc(next.title)}</b> · <span class="num">${T.rel(next.start, n)} ${T.timeShort(next.start)}</span></span></p>` : ''}
+      <div class="sheet-actions">
+        <button class="btn" data-action="rejectProposal">Reject</button>
+        <button class="btn ghost" data-action="editProposal">Edit</button>
+        <button class="btn primary" data-action="acceptProposal">Accept changes</button>
+      </div>`;
   }
 
   // ---------- Task details / edit ----------
@@ -1274,7 +1533,7 @@
     d.parts.forEach((p, i) => {
       const tp = t.parts[i];
       tp.title = p.title;
-      if (p.done && !tp.done) { tp.done = true; tp.remainingMins = 0; changes.push(`${tp.title} done`); }
+      if (p.done && !tp.done) { S.completePart(state, t.id, tp.id); changes.push(`${tp.title} done`); }
       if (!p.done && tp.done) { tp.done = false; tp.remainingMins = tp.mins; }
     });
     if (d.total && d.total !== S.taskTotal(t)) { S.setDuration(t, d.total); changes.push('duration'); }
@@ -1312,6 +1571,7 @@
       <p class="sheet-sub">SIKAD is stateless about time: everything is computed from this clock. Move it forward to walk through the week. Sessions that pass without "Done" become check-ins and get rescheduled.</p>
       <label>Jump to<input type="datetime-local" id="clock-input" value="${T.toInput(now())}"></label>
       <div class="row end"><button class="btn" data-action="setClock">Set time</button></div>
+      <div class="row end"><button class="btn small" data-action="loadDemoConfirm">Reset demo to the initial scenario</button></div>
       ${presets.length ? `<p class="small"><b>Story checkpoints</b></p><div class="chips">${presets.map(([l, ms]) => `<button class="chip-btn" data-action="jump" data-ms="${ms}">${esc(l)}</button>`).join('')}</div>` : ''}`;
   }
 
@@ -1354,6 +1614,7 @@
       focusHeading();
     },
     obBack() { ui.ob.step = Math.max(0, ui.ob.step - 1); render(); focusHeading(); },
+    obGoto(ds) { ui.ob.step = Number(ds.step); render(); window.scrollTo(0, 0); focusHeading(); },
     obSet(ds) {
       const v = ds.value;
       const [obj, key] = ds.path.split('.');
@@ -1415,13 +1676,15 @@
     loadDemo() {
       state = S.loadDemo(S.reset());
       ui.ob = freshOnboarding(); ui.tab = 'home'; undoSnap = null;
+      ui.sheet = null; ui.askThread = []; ui.dict = null; ui.dumpDraft = null; ui.focusPick = null; ui.focusPartial = false; ui.prevPct = null; ui.error = null;
       render();
-      toast("Loaded Alex's week. Try Brain dump, or move the demo clock.", { ms: 6000 });
+      toast("Loaded Alex's week. Try Ask SIKAD, or move the demo clock.", { ms: 6000 });
     },
-    loadDemoConfirm() { if (confirm("Replace everything with Alex's demo week?")) A.loadDemo(); },
+    loadDemoConfirm() { if (confirm('Reset the demo? This replaces all saved data with the initial Alex scenario.')) A.loadDemo(); },
     resetAll() {
       if (!confirm('Erase all data and restart setup?')) return;
-      state = S.reset(); ui.ob = freshOnboarding(); ui.sheet = null; undoSnap = null; render();
+      state = S.reset(); ui.ob = freshOnboarding(); ui.sheet = null; undoSnap = null;
+      ui.askThread = []; ui.dict = null; ui.dumpDraft = null; ui.focusPick = null; ui.prevPct = null; ui.error = null; render();
     },
     toggleIntegration(ds) { state.integrations[ds.id] = !state.integrations[ds.id]; render(); },
 
@@ -1453,13 +1716,54 @@
     },
 
     // --- focus card
-    start(ds) { snapshot('Start'); S.startSession(state, ds.id); render(); },
+    start(ds) { ui.focusPick = ds.id; ui.focusMethod = null; render(); const h = document.getElementById('method-title'); if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); } },
+    focusMethod(ds) { ui.focusMethod = ds.v; render(); },
+    focusCancel() { ui.focusPick = null; ui.focusMethod = null; render(); },
+    focusBegin(ds) {
+      const s = S.findSession(state, ds.id);
+      if (!s) return;
+      const rec = F.recommend(focusContext(s, taskById(s.taskId)));
+      const opt = rec.options.find((o) => o.method === (ui.focusMethod || rec.method));
+      snapshot('Start session');
+      S.startSession(state, ds.id, opt.setup);
+      ui.focusPick = null; ui.focusMethod = null; ui.focusPartial = false;
+      render();
+    },
+    focusPause() { S.pauseSession(state); render(); },
+    focusResume() { S.resumeSession(state); render(); },
+    focusSkip(ds) { S.skipSession(state, Number(ds.mins)); render(); tickTimer(); },
+    focusEnd() {
+      if (!state.active) return;
+      S.pauseSession(state); state.active.status = 'awaiting'; ui.focusPartial = false;
+      render();
+      const q = document.getElementById('outcome-title');
+      if (q) q.focus({ preventScroll: true });
+    },
+    focusKeepWorking() {
+      const a = state.active;
+      if (!a) return;
+      if (F.timer(a, S.focusElapsedMs(a)).finished) a.method = 'none';   // the set structure is used up; carry on with a plain timer
+      a.status = 'paused'; S.resumeSession(state); ui.focusPartial = false;
+      render();
+    },
+    focusPartialBack() { ui.focusPartial = false; render(); },
+    focusOutcome(ds) {
+      if (ds.v === 'partial') { ui.focusPartial = true; render(); const i = document.getElementById('focus-left'); if (i) i.focus({ preventScroll: true }); return; }
+      endFocusSession(ds.v);
+    },
+    focusSavePartial() {
+      const input = document.getElementById('focus-left');
+      const mins = Math.round(Number(input.value) * 60);
+      if (!(mins > 0)) { flagField(input, 'Enter how much time is still needed, e.g. 0.5 for half an hour.'); return; }
+      endFocusSession('partial', mins);
+    },
     done(ds) {
       snapshot('Done');
       const s = S.findSession(state, ds.id);
       S.completeSession(state, ds.id);
+      ui.celebrate = true;
       render();
-      toast(`Nice — "${s.title}" done. Next task promoted.`, { undo: true });
+      toast(`"${s.title}" is done. Your plan has been updated.`, { undo: true });
     },
     snooze(ds) {
       snapshot('Snooze');
@@ -1505,12 +1809,37 @@
     scenario(ds) { ui.sheet.text = D.SCENARIOS[Number(ds.i)].text; render(); },
     processDump() {
       const text = (ui.sheet.text || '').trim();
-      if (!text) { flagField(document.getElementById('dump-text'), 'Nothing to update yet. Say or type what changed, e.g. "I have to work tonight 6 to 10".'); return; }
+      if (!text) { flagField(document.getElementById('dump-text'), 'Nothing to send yet. Ask a question or say what changed, e.g. "I have to work tonight 6 to 10".'); return; }
       stopVoice();
+      // A question is answered from the current plan; anything else goes to interpret → review → confirm.
+      const ans = Assistant.answer(state, text);
+      if (ans) {
+        ui.askThread.push({ q: text, a: ans });
+        S.log(state, 'Ask SIKAD · answer (rule-based, not a model)', text, { kind: ans.kind, title: ans.title, lines: ans.lines, facts: ans.facts });
+        ui.sheet.text = ''; ui.sheet.restored = false; ui.dumpDraft = null; ui.dict = null;
+        render();
+        const latest = document.getElementById('ask-latest');
+        if (latest) { latest.focus({ preventScroll: true }); latest.scrollIntoView({ block: 'nearest' }); }
+        return;
+      }
       processDump(text);
       render();
       focusFirstQuestion();
     },
+    askExample(ds) { ui.sheet.text = D.QUESTIONS[Number(ds.i)]; A.processDump(); },
+    acceptProposal() {
+      const draft = ui.sheet.draft;
+      snapshot('Ask SIKAD');
+      draft.engineLog = state.engineLog;
+      state = draft;
+      ui.dumpDraft = null; ui.dict = null;
+      ui.sheet = null; ui.tab = 'home'; ui.focusOnly = false;
+      render();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    rejectProposal() { ui.sheet = null; ui.dumpDraft = null; render(); toast('No changes were made. Your plan is as it was.'); },
+    editProposal() { ui.sheet = ui.sheet.review; render(); },
+    scrollAttention() { const el = document.getElementById('attention'); if (el) { el.scrollIntoView({ block: 'start' }); el.focus({ preventScroll: true }); } },
     dumpEdit() { ui.sheet.mode = 'input'; render(); },
     template(ds) { ui.sheet = { type: 'dump', mode: 'input', input: 'text', text: ds.v }; render(); setTimeout(() => { const el = document.getElementById('dump-text'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 60); },
     resolve(ds) { ui.sheet.items[Number(ds.n)].resolution = ds.v; render(); },
@@ -1536,7 +1865,15 @@
       S.replan(state, `New task: ${task.title}`, { notes: task.deadline == null ? [`"${task.title}" needs a deadline before it can be scheduled.`] : [] });
       render();
     },
-    voice(ds) { toggleVoice(ds.path); },
+    dictStart(ds) { dictStart(ds.path); },
+    dictStop() { if (recog) { try { recog.stop(); } catch (e) { finishDictation(); } } },
+    dictCancel() { if (ui.dict) ui.dict.cancelled = true; if (recog) { try { recog.abort(); } catch (e) { /* already stopped */ } } finishDictation(); },
+    dictDemo(ds) {
+      const text = ds.path === 'ob.dumpText' ? D.SAMPLE_BRAIN_DUMP : D.SAMPLE_TRANSCRIPT;
+      setPath(ui, ds.path, text);
+      ui.dict = { path: ds.path, state: 'ready', final: '', interim: '', note: 'demo' };
+      render();
+    },
 
     // --- tasks
     openTask(ds) { openTask(ds.id); },
@@ -1545,12 +1882,10 @@
     completeTask() {
       const t = taskById(ui.sheet.id);
       snapshot('Complete task');
-      t.status = 'done';
-      (t.parts || []).forEach((p) => { p.done = true; p.remainingMins = 0; });
-      t.remainingMins = 0;
-      state.history.push({ id: `${t.id}@${now()}`, taskId: t.id, title: t.title, start: now(), end: now(), doneAt: now() });
+      S.completeTask(state, t.id);
       ui.sheet = null;
       S.replan(state, `Completed: ${t.title}`);
+      ui.celebrate = true;
       render();
     },
     deleteTask() {
@@ -1597,9 +1932,27 @@
     backdrop(ds, el, e) { if (e.target === el) A.closeSheet(); },
   };
 
-  /** Dismissing the Brain dump sheet must not throw away what the student typed. */
+  /** Dismissing Ask SIKAD must not throw away what the student typed. */
   function keepDraft() {
-    if (ui.sheet && ui.sheet.type === 'dump') ui.dumpDraft = (ui.sheet.text || '').trim() || null;
+    if (!ui.sheet) return;
+    if (ui.sheet.type === 'dump') ui.dumpDraft = (ui.sheet.text || '').trim() || null;
+    if (ui.sheet.type === 'proposal') ui.dumpDraft = (ui.sheet.review.text || '').trim() || null;
+  }
+
+  /** The student has said how the session went: record it, update the task and replan. */
+  function endFocusSession(outcome, remainingMins) {
+    const a = state.active;
+    if (!a) return;
+    const s = S.findSession(state, a.sessionId);
+    const focusedMins = F.timer(a, S.focusElapsedMs(a)).focusedMins;
+    snapshot('End session');
+    S.endFocus(state, { outcome, remainingMins, focusedMins });
+    ui.focusPartial = false;
+    if (outcome === 'complete') ui.celebrate = true;
+    render();
+    toast(outcome === 'complete' ? `"${s.title}" is done. Your plan has been updated.`
+      : outcome === 'partial' ? `Progress saved. ${T.dur(remainingMins)} is back in your plan.`
+      : 'Session recorded. The work is still on your plan.', { undo: true });
   }
 
   function formValues(id) {
@@ -1626,33 +1979,50 @@
 
   // ----------------------------------------------------------------- voice --
   let recog = null;
-  function toggleVoice(path) {
-    if (ui.listening) { stopVoice(); return; }
+  function dictStart(path) {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { ui.voiceNote = true; render(); return; }
-    recog = new SR();
-    recog.lang = 'en-US';
-    recog.interimResults = true;
+    if (!SR) { render(); return; }                        // the panel already shows the fallback
     const field = document.querySelector(`[data-bind="${path}"]`);
-    const base = field && field.value ? field.value.trim() + ' ' : '';
+    ui.dict = { path, state: 'recording', final: '', interim: '', base: field && field.value.trim() ? field.value.trim() + ' ' : '', startedReal: Date.now() };
+    recog = new SR();
+    recog.lang = 'en-PH';
+    recog.continuous = true;
+    recog.interimResults = true;
     recog.onresult = (e) => {
-      const txt = Array.from(e.results).map((r) => r[0].transcript).join(' ');
-      const el = document.querySelector(`[data-bind="${path}"]`);
-      const root = path.startsWith('ob.') ? ui : ui;
-      setPath(root, path, base + txt);
-      if (el) el.value = base + txt;
+      if (!ui.dict) return;
+      let fin = '', interim = '';
+      for (let i = 0; i < e.results.length; i++) { if (e.results[i].isFinal) fin += e.results[i][0].transcript + ' '; else interim += e.results[i][0].transcript; }
+      ui.dict.final = fin; ui.dict.interim = interim;
+      const live = document.getElementById('dict-interim');
+      if (live) live.textContent = (fin + interim) || 'Listening…';
     };
-    recog.onerror = () => toast("Couldn't hear that. Check microphone permissions, or type instead.");
-    recog.onend = () => { ui.listening = null; updateMic(path); };
-    try { recog.start(); ui.listening = path; updateMic(path); } catch (err) { toast('Voice input is unavailable right now.'); }
+    recog.onerror = (e) => { if (ui.dict) ui.dict.errorCode = e.error; };
+    recog.onend = finishDictation;
+    try { recog.start(); } catch (err) { ui.dict.errorCode = 'start-failed'; finishDictation(); return; }
+    render();
+    const stop = document.querySelector('[data-action="dictStop"]');
+    if (stop) stop.focus({ preventScroll: true });
   }
-  function stopVoice() { if (recog) { try { recog.stop(); } catch (e) { /* already stopped */ } } ui.listening = null; }
-  function updateMic(path) {
-    const btn = document.querySelector(`.mic[data-path="${path}"]`);
-    if (!btn) return;
-    btn.classList.toggle('listening', ui.listening === path);
-    const label = btn.nextElementSibling;
-    if (label) label.textContent = ui.listening === path ? 'Listening… tap to stop' : 'Tap to speak';
+  /** Recording ended (Stop, Cancel, silence or an error): put the transcript in the editable field, or explain why there is none. */
+  function finishDictation() {
+    const d = ui.dict;
+    recog = null;
+    if (!d || d.state !== 'recording') return;
+    const text = (d.final + d.interim).trim();
+    d.state = 'ready';
+    if (d.cancelled) d.note = 'cancelled';
+    else if (text) { setPath(ui, d.path, d.base + text); d.note = 'transcribed'; }
+    else d.error = VOICE_ERRORS[d.errorCode] || 'Nothing was transcribed. Try again, or type instead.';
+    render();
+    const field = document.querySelector(`[data-bind="${d.path}"]`);
+    if (field && !d.cancelled && text) field.focus({ preventScroll: true });
+  }
+  /** Leaving the panel while recording discards the recording quietly. */
+  function stopVoice() {
+    if (!ui.dict || ui.dict.state !== 'recording') return;
+    const r = recog;
+    recog = null; ui.dict = null;
+    if (r) { r.onend = null; try { r.abort(); } catch (e) { /* already stopped */ } }
   }
 
   // ---------------------------------------------------------------- events --
@@ -1732,6 +2102,9 @@
 
   // Keep the toggle's icon in sync when following the OS setting and it changes.
   if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', () => { if (!document.documentElement.dataset.theme) render(); });
+
+  // Tell the student if saved data was unreadable and had to be replaced.
+  if (state.loadNotice) { const msg = state.loadNotice; delete state.loadNotice; setTimeout(() => toast(msg, { ms: 7000 }), 300); }
 
   // Deep link: open the tab named in the URL (e.g. index.html#tasks).
   if (state.onboarded && TABS.includes(location.hash.slice(1))) ui.tab = location.hash.slice(1);

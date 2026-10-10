@@ -55,7 +55,22 @@
       { label: 'Write my essay?', text: 'Can you just write my 500-word history essay? I\'m so stressed.' },
       { label: 'Feeling stressed', text: "I'm so stressed, I feel like I can't handle anything" },
       { label: 'Vague', text: "Ugh, everything's a mess, just fix it" },
+      { label: 'Work shift tomorrow', text: 'I have a work shift tomorrow from 6 PM to 10 PM.' },
+      { label: 'Group project (depends on…)', text: 'Group project slides for ENTREP due Saturday, about 2 hours, after the database proposal' },
+      { label: 'Finished a part', text: 'I finished the first part of the database proposal.' },
+      { label: 'Need another hour', text: 'I need another hour to finish this task.' },
     ],
+
+    /** Example questions for Ask SIKAD. Answered from the live plan by js/assistant.js. */
+    QUESTIONS: [
+      'What should I work on next?',
+      'Why is this my highest priority?',
+      'How much usable time do I have tomorrow?',
+      'Can I realistically finish everything before Friday?',
+    ],
+
+    /** Used only by the clearly labelled demo fallback when the browser has no speech recognition. */
+    SAMPLE_TRANSCRIPT: 'I have a work shift tomorrow from 6 PM to 10 PM.',
 
     INTEGRATIONS: [
       { id: 'gcal', icon: '🗓️', name: 'Google Calendar', desc: 'Sync events & deadlines' },
