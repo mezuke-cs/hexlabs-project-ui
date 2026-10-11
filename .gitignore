@@ -1,0 +1,12 @@
+
+# Local AI agent files
+.agents/
+
+# Ignore local AI agent files
+.agents/
+
+# Ignore project ZIP archive
+hexlabs-project.zip
+
+# Ignore Windows Zone.Identifier metadata
+*:Zone.Identifier

@@ -34,5 +34,12 @@
   <script src="js/assistant.js"></script>
   <script src="js/motion.js"></script>
   <script src="js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        try { navigator.serviceWorker.register('./sw.js').catch(function () {}); } catch (e) {}
+      });
+    }
+  </script>
 </body>
 </html>

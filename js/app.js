@@ -9,13 +9,32 @@
 
   let state = S.load();
   let undoSnap = null;
+
+  const TUTORIAL_KEY = 'sikad-tutorial-seen';
+  function hasSeenTutorial() {
+    try {
+      return localStorage.getItem(TUTORIAL_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+  function markTutorialSeen() {
+    try {
+      localStorage.setItem(TUTORIAL_KEY, '1');
+    } catch (e) {}
+  }
+
   const ui = {
     tab: 'home', dayView: 'today', weekDay: null, sheet: null, toast: null, focusOnly: false,
+    tutorialOpen: !hasSeenTutorial() && !state.onboarded,
+    tutorialSlide: 0,
     askThread: [],      // answered questions shown in the Ask SIKAD panel (this visit only)
     dict: null,         // dictaphone state: { path, state, final, interim, note, error }
     focusPick: null,    // session id while the student is choosing a working method
     spotlightOff: false, // the student un-dimmed the screen during Focus Mode; the session keeps running
     ob: state.obDraft || freshOnboarding(),
+    integrationState: {}, // Batch 6: UI-only map ui.integrationState[id] = { status, account, lastSync, imported, error }
+    isOffline: typeof navigator !== 'undefined' && !navigator.onLine,
   };
 
   const $app = document.getElementById('app');
@@ -24,17 +43,91 @@
 
   function freshOnboarding() {
     return {
-      step: 0, name: '', corText: '', classes: [], analysis: '', extracted: false, uploadNote: '',
+      step: 0, name: '', corText: '', classes: [], analysis: '', extracted: false, uploadNote: '', extracting: false, parsingDump: false,
       ls: { dayStart: '06:00', dayEnd: '22:00', commuteMins: 60, working: null, workDays: [6], workStart: '09:00', workEnd: '14:00',
         org: null, orgDay: 4, orgStart: '17:00', orgEnd: '19:00' },
       dumpText: '', review: null, genStep: 0,
     };
   }
 
+  // Judge mode support (Batch 1: gated behind ?demo=1 or 5 taps on version text)
+  const JUDGE_KEY = 'sikad-judge';
+  function isJudge() {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (p.get('demo') === '1') { localStorage.setItem(JUDGE_KEY, '1'); return true; }
+      if (p.get('demo') === '0') { localStorage.removeItem(JUDGE_KEY); return false; }
+      return localStorage.getItem(JUDGE_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+  function setJudge(on) {
+    try {
+      if (on) localStorage.setItem(JUDGE_KEY, '1');
+      else localStorage.removeItem(JUDGE_KEY);
+    } catch (e) {}
+  }
+  let versionTaps = [];
+  function recordVersionTap() {
+    const t = Date.now();
+    versionTaps = versionTaps.filter((ts) => t - ts < 3000);
+    versionTaps.push(t);
+    if (versionTaps.length >= 5) {
+      versionTaps = [];
+      const cur = isJudge();
+      setJudge(!cur);
+      render();
+      toast(!cur ? 'Judge mode enabled.' : 'Judge mode disabled (Product mode).');
+    }
+  }
+
+  // Batch 6: Integration seam
+  // window.SikadIntegrations provides adapters for external platforms.
+  // connect(id) returns Promise<{ account, items:[{title, due, source}] }> or rejects with { message }.
+  window.SikadIntegrations = window.SikadIntegrations || {
+    gcal: {
+      connect() {
+        return new Promise((resolve, reject) => {
+          setTimeout(() => {
+            if (isJudge()) {
+              resolve({
+                account: 'alex.s@up.edu.ph',
+                items: [
+                  { title: 'CS 199 Thesis Progress Report', due: new Date(Date.now() + 86400000 * 2).toISOString(), source: 'Google Calendar' },
+                  { title: 'Project Consultation with Adviser', due: new Date(Date.now() + 86400000 * 3).toISOString(), source: 'Google Calendar' }
+                ]
+              });
+            } else {
+              // Stub error in product mode: no OAuth client configured yet
+              reject({ message: 'Google Calendar connection failed: No OAuth client configured. Check network and credentials.' });
+            }
+          }, 800);
+        });
+      }
+    }
+  };
+
+  function getIntegrationState(id) {
+    if (!ui.integrationState) ui.integrationState = {};
+    if (!ui.integrationState[id]) {
+      const hasAdapter = !!(window.SikadIntegrations && window.SikadIntegrations[id]);
+      const isConn = !!(state.integrations && state.integrations[id] && isJudge());
+      ui.integrationState[id] = {
+        status: hasAdapter ? (isConn ? 'connected' : 'idle') : 'unavailable',
+        account: isConn ? 'alex.s@up.edu.ph' : '',
+        lastSync: isConn ? 'Synced recently · 2 items' : '',
+        imported: [],
+        error: null
+      };
+    }
+    return ui.integrationState[id];
+  }
+
   // -------------------------------------------------------------- helpers --
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const taskById = (id) => state.tasks.find((t) => t.id === id);
-  const now = () => state.now;
+  const now = () => (isJudge() ? state.now : Date.now());
   const PRI_LABEL = { high: 'High', medium: 'Medium', low: 'Low' };
   // Priority is a ranking, not a status: neutral chip + bar glyph (design.md §5.4).
   const PRI_BARS = { high: 3, medium: 2, low: 1 };
@@ -83,16 +176,48 @@
   let themeFade = 0;
   const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   const currentTheme = () => document.documentElement.dataset.theme || (darkQuery && darkQuery.matches ? 'dark' : 'light');
-  function applyTheme(theme) {
-    document.documentElement.dataset.theme = theme;
-    const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', theme === 'dark' ? '#131917' : '#294B3A');
-    try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* storage unavailable: still applies for this session */ }
+  function getThemeSetting() {
+    try {
+      const s = localStorage.getItem(THEME_KEY);
+      if (s === 'light' || s === 'dark') return s;
+      return 'system';
+    } catch (e) {
+      return 'system';
+    }
   }
-  function themeToggle() {
-    const dark = currentTheme() === 'dark';
-    return `<button class="theme-toggle" data-action="toggleTheme" aria-pressed="${dark}" aria-label="Dark mode" title="${dark ? 'Switch to light mode' : 'Switch to dark mode'}">
-      ${dark ? ICON.sun : ICON.moon}<span>${dark ? 'Light' : 'Dark'}</span></button>`;
+  function setThemeSetting(setting) {
+    const html = document.documentElement;
+    html.classList.add('theme-fade');
+    clearTimeout(themeFade);
+    themeFade = setTimeout(() => html.classList.remove('theme-fade'), M.DUR.enter + 40);
+    try {
+      if (setting === 'system') {
+        localStorage.removeItem(THEME_KEY);
+        delete html.dataset.theme;
+      } else {
+        localStorage.setItem(THEME_KEY, setting);
+        html.dataset.theme = setting;
+      }
+    } catch (e) {}
+    const isDark = setting === 'dark' || (setting === 'system' && darkQuery && darkQuery.matches);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', isDark ? '#131917' : '#294B3A');
+    render();
+  }
+  function applyTheme(theme) {
+    setThemeSetting(theme);
+  }
+  function appearanceCard() {
+    const cur = getThemeSetting();
+    return `
+      <section class="card settings">
+        <h2>Appearance</h2>
+        <div class="seg" role="radiogroup" aria-label="Appearance">
+          <button class="${cur === 'light' ? 'on' : ''}" role="radio" aria-checked="${cur === 'light'}" data-action="setTheme" data-theme="light">Light</button>
+          <button class="${cur === 'dark' ? 'on' : ''}" role="radio" aria-checked="${cur === 'dark'}" data-action="setTheme" data-theme="dark">Dark</button>
+          <button class="${cur === 'system' ? 'on' : ''}" role="radio" aria-checked="${cur === 'system'}" data-action="setTheme" data-theme="system">System</button>
+        </div>
+      </section>`;
   }
 
   function setPath(obj, path, value) {
@@ -231,6 +356,7 @@
   }
 
   function render() {
+    if (!isJudge()) state.now = Date.now();
     const after = pending && pending.after;
     if (pending) { clearTimeout(pending.timer); pending = null; }
     state.obDraft = state.onboarded ? null : ui.ob;
@@ -239,12 +365,11 @@
     syncHistory(opening, closing);
     if (opening) sheetOpener = describe(document.activeElement);
     const keep = !opening && !closing ? focusKey(document.activeElement) : null;
-    const viewKey = state.onboarded ? `app:${ui.tab}:${ui.focusOnly ? 'one' : 'all'}` : `ob:${ui.ob.step}`;
+    const viewKey = ui.tutorialOpen ? `tutorial:${ui.tutorialSlide}` : (state.onboarded ? `app:${ui.tab}:${ui.focusOnly ? 'one' : 'all'}` : `ob:${ui.ob.step}`);
     const sheetKey = ui.sheet ? `${ui.sheet.type}:${ui.sheet.mode || ''}` : null;
     const snap = M.capture($app);
     const oldSheet = $sheet.querySelector('.sheet-backdrop:not(.is-closing)');
-    const sheetScroll = oldSheet && sheetKey === lastSheetKey ? oldSheet.firstElementChild.scrollTop : 0;
-    $app.innerHTML = state.onboarded ? shell() : onboarding();
+    $app.innerHTML = (ui.isOffline ? '<div class="offline-banner" role="status" aria-live="polite"><span>You\'re offline. Your plan still works. Syncing resumes when you\'re back.</span></div>' : '') + (ui.tutorialOpen ? tutorialScreen() : (state.onboarded ? shell() : onboarding()));
     if (closing && oldSheet && !M.reduced()) leave(oldSheet, 'is-closing', 160);
     else $sheet.innerHTML = ui.sheet ? sheet() : '';
     if (ui.sheet) {
@@ -264,12 +389,12 @@
       sheetOpener = null;
     } else if (keep) {
       // Same control if it still exists; otherwise the Focus Card title or the view heading.
-      const again = document.querySelector(keep) || document.querySelector(ui.sheet ? '#sheet-title' : '#focus-title, main h1, .ob-title');
+      const again = document.querySelector(keep) || document.querySelector(ui.sheet ? '#sheet-title' : (ui.tutorialOpen ? '.tutorial-title, .tutorial-next-btn, .tutorial-finish-btn' : '#focus-title, main h1, .ob-title'));
       if (again && again !== document.activeElement) again.focus({ preventScroll: true });
     }
     sheetWasOpen = !!ui.sheet;
     const sig = updateSig();
-    M.play($app, snap, { sameView: viewKey === lastViewKey, viewEl: $app.querySelector('main, .onboarding'), washNew: !!sig && sig !== lastWashSig });
+    M.play($app, snap, { sameView: viewKey === lastViewKey, viewEl: $app.querySelector('main, .onboarding, .tutorial-screen'), washNew: !!sig && sig !== lastWashSig });
     lastViewKey = viewKey; lastWashSig = sig;
     if (state.onboarded) ui.prevPct = S.weeklyProgress(state).percent;
     ui.celebrate = false;
@@ -313,6 +438,179 @@
   }
   setInterval(tickTimer, 1000);
 
+  // ======================================================= APP TUTORIAL ==
+  const TUTORIAL_SLIDES = [
+    {
+      tagline: 'Momentum & Flow',
+      title: 'Find your momentum',
+      desc: 'SIKAD sees what you can realistically achieve with the hours you actually have — without toxic productivity or burnout.',
+      svg: `<svg viewBox="0 0 320 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 140 C 90 120, 180 150, 310 125" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="4 4" fill="none" opacity="0.6"/>
+        <path d="M10 95 C 100 80, 200 110, 310 85" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="4 4" fill="none" opacity="0.4"/>
+        <path d="M30 145 C 80 145, 100 100, 160 95 C 220 90, 240 45, 290 40" stroke="var(--forest)" stroke-width="4" stroke-linecap="round" fill="none"/>
+        <circle cx="45" cy="144" r="8" fill="var(--surface)" stroke="var(--forest)" stroke-width="3"/>
+        <circle cx="45" cy="144" r="3" fill="var(--forest)"/>
+        <circle cx="160" cy="95" r="9" fill="var(--surface)" stroke="var(--forest)" stroke-width="3"/>
+        <circle cx="160" cy="95" r="3.5" fill="var(--forest)"/>
+        <circle cx="275" cy="44" r="18" fill="var(--butter)" fill-opacity="0.25"/>
+        <circle cx="275" cy="44" r="12" fill="var(--butter)" stroke="var(--forest)" stroke-width="3"/>
+        <path d="M271 44 L274 47 L280 41" stroke="var(--forest)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <g transform="translate(18, 55)">
+          <rect width="112" height="28" rx="14" fill="var(--sage-tint)" stroke="var(--forest)" stroke-width="1"/>
+          <circle cx="14" cy="14" r="4" fill="var(--forest)"/>
+          <text x="24" y="18" font-family="var(--font-sans)" font-size="11" font-weight="700" fill="var(--forest)">REALISTIC TIME</text>
+        </g>
+        <g transform="translate(190, 125)">
+          <rect width="105" height="28" rx="14" fill="var(--surface-2)" stroke="var(--line-strong)" stroke-width="1"/>
+          <text x="52" y="18" font-family="var(--font-sans)" font-size="11" font-weight="600" fill="var(--ink-2)" text-anchor="middle">ZERO BURNOUT</text>
+        </g>
+      </svg>`
+    },
+    {
+      tagline: 'Sacred Baseline',
+      title: 'Your baseline is sacred',
+      desc: 'Classes, commutes, and org meetings are fixed anchors. SIKAD plans study around them and never moves or cancels them automatically.',
+      svg: `<svg viewBox="0 0 320 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <g transform="translate(25, 18)">
+          <rect width="270" height="48" rx="8" fill="var(--sky-tint)" stroke="var(--harbor)" stroke-width="1.5"/>
+          <rect x="0" y="0" width="5" height="48" rx="2.5" fill="var(--harbor)"/>
+          <rect x="18" y="22" width="14" height="11" rx="2" fill="none" stroke="var(--harbor)" stroke-width="1.8"/>
+          <path d="M21 22 V 17 C 21 14.5, 29 14.5, 29 17 V 22" stroke="var(--harbor)" stroke-width="1.8" fill="none"/>
+          <text x="40" y="26" font-family="var(--font-display)" font-size="13" font-weight="700" fill="var(--ink)">CMSC 199 Thesis</text>
+          <text x="40" y="40" font-family="var(--font-mono)" font-size="11" font-weight="600" fill="var(--harbor)">08:00 – 10:00 · FTF</text>
+          <rect x="200" y="14" width="56" height="20" rx="10" fill="var(--surface)" stroke="var(--harbor)" stroke-width="1"/>
+          <text x="228" y="28" font-family="var(--font-sans)" font-size="10" font-weight="700" fill="var(--harbor)" text-anchor="middle">LOCKED</text>
+        </g>
+        <g transform="translate(25, 74)">
+          <rect width="270" height="34" rx="6" fill="var(--surface-2)" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="4 3"/>
+          <rect x="18" y="9" width="14" height="14" rx="2" stroke="var(--ink-2)" stroke-width="1.5" fill="none"/>
+          <circle cx="21" cy="20" r="1.5" fill="var(--ink-2)"/>
+          <circle cx="29" cy="20" r="1.5" fill="var(--ink-2)"/>
+          <text x="40" y="21" font-family="var(--font-sans)" font-size="12" font-weight="500" fill="var(--ink-2)">Commute buffer · 45m protected</text>
+        </g>
+        <g transform="translate(25, 116)">
+          <rect width="270" height="46" rx="8" fill="var(--surface)" stroke="var(--forest)" stroke-width="1.5"/>
+          <rect x="0" y="0" width="5" height="46" rx="2.5" fill="var(--forest)"/>
+          <circle cx="25" cy="23" r="5" fill="var(--forest)"/>
+          <text x="40" y="24" font-family="var(--font-display)" font-size="13" font-weight="700" fill="var(--ink)">Literature Review</text>
+          <text x="40" y="39" font-family="var(--font-mono)" font-size="11" font-weight="600" fill="var(--forest)">11:00 – 12:30 · Flexible</text>
+          <rect x="200" y="13" width="56" height="20" rx="10" fill="var(--sage-tint)" stroke="var(--forest)" stroke-width="1"/>
+          <text x="228" y="27" font-family="var(--font-sans)" font-size="10" font-weight="700" fill="var(--forest)" text-anchor="middle">FLEXIBLE</text>
+        </g>
+      </svg>`
+    },
+    {
+      tagline: 'Singular Focus',
+      title: 'The Focus Card',
+      desc: 'Stop juggling ten deadlines at once. SIKAD surfaces the one right step for right now, with dedicated work methods like Pomodoro, Flowtime, and Chunking.',
+      svg: `<svg viewBox="0 0 320 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="25" y="14" width="270" height="152" rx="16" fill="#294B3A" stroke="var(--forest)" stroke-width="1"/>
+        <circle cx="45" cy="35" r="4" fill="var(--butter)"/>
+        <text x="56" y="39" font-family="var(--font-sans)" font-size="10" font-weight="800" fill="var(--butter)" letter-spacing="1">CURRENT FOCUS</text>
+        <text x="45" y="66" font-family="var(--font-display)" font-size="17" font-weight="800" fill="#FFFDF7">ADET Project Report</text>
+        <text x="45" y="84" font-family="var(--font-sans)" font-size="12" font-weight="500" fill="#A8B99A">Section 3 · Architecture</text>
+        <g transform="translate(205, 50)">
+          <circle cx="36" cy="36" r="32" stroke="rgba(255,255,255,0.15)" stroke-width="4" fill="none"/>
+          <circle cx="36" cy="36" r="32" stroke="var(--butter)" stroke-width="4" stroke-dasharray="200" stroke-dashoffset="60" stroke-linecap="round" fill="none"/>
+          <text x="36" y="42" font-family="var(--font-sans)" font-size="15" font-weight="800" fill="#FFFDF7" text-anchor="middle">25:00</text>
+        </g>
+        <g transform="translate(45, 114)">
+          <rect x="0" y="0" width="80" height="26" rx="13" fill="var(--butter)" stroke="var(--butter)" stroke-width="1"/>
+          <text x="40" y="17" font-family="var(--font-sans)" font-size="11" font-weight="700" fill="#26332D" text-anchor="middle">Pomodoro</text>
+          <rect x="86" y="0" width="72" height="26" rx="13" fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+          <text x="122" y="17" font-family="var(--font-sans)" font-size="11" font-weight="600" fill="#FFFDF7" text-anchor="middle">Flowtime</text>
+          <rect x="164" y="0" width="74" height="26" rx="13" fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+          <text x="201" y="17" font-family="var(--font-sans)" font-size="11" font-weight="600" fill="#FFFDF7" text-anchor="middle">Chunking</text>
+        </g>
+      </svg>`
+    },
+    {
+      tagline: 'Zero Guilt',
+      title: 'Guilt-free replanning',
+      desc: 'Life changes, plans slip, or energy shifts. SIKAD recalculates your schedule with one tap and zero judgment. Everything can be undone instantly.',
+      svg: `<svg viewBox="0 0 320 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <g transform="translate(25, 22)">
+          <rect width="115" height="52" rx="8" fill="var(--surface-2)" stroke="var(--line)" stroke-width="1"/>
+          <text x="14" y="24" font-family="var(--font-sans)" font-size="11" font-weight="600" fill="var(--ink-3)">Delayed slot</text>
+          <text x="14" y="40" font-family="var(--font-display)" font-size="13" font-weight="700" fill="var(--ink-2)">2:00 PM</text>
+        </g>
+        <path d="M148 48 C 175 48, 165 106, 184 106" stroke="var(--forest)" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="5 4" fill="none"/>
+        <polygon points="184,101 192,106 184,111" fill="var(--forest)"/>
+        <g transform="translate(180, 80)">
+          <rect width="115" height="52" rx="8" fill="var(--sage-tint)" stroke="var(--forest)" stroke-width="1.5"/>
+          <rect x="0" y="0" width="4" height="52" rx="2" fill="var(--forest)"/>
+          <text x="14" y="24" font-family="var(--font-sans)" font-size="11" font-weight="700" fill="var(--forest)">Recalculated</text>
+          <text x="14" y="40" font-family="var(--font-display)" font-size="13" font-weight="700" fill="var(--ink)">4:30 PM · Fits!</text>
+        </g>
+        <g transform="translate(48, 134)">
+          <rect width="224" height="34" rx="17" fill="var(--ink)" stroke="none"/>
+          <text x="22" y="21" font-family="var(--font-sans)" font-size="11" font-weight="600" fill="var(--bg)">Plan recalculated.</text>
+          <g transform="translate(150, 6)">
+            <rect width="60" height="22" rx="11" fill="var(--butter)"/>
+            <path d="M15 11 L10 8 L15 5" stroke="var(--on-butter)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M11 8 H20 C23 8 25 10 25 13" stroke="var(--on-butter)" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+            <text x="32" y="15" font-family="var(--font-sans)" font-size="11" font-weight="800" fill="var(--on-butter)">Undo</text>
+          </g>
+        </g>
+      </svg>`
+    }
+  ];
+
+  function tutorialScreen() {
+    const s = TUTORIAL_SLIDES[ui.tutorialSlide] || TUTORIAL_SLIDES[0];
+    const isLast = ui.tutorialSlide === TUTORIAL_SLIDES.length - 1;
+    return `
+      <div class="screen tutorial-screen" role="region" aria-roledescription="carousel" aria-label="SIKAD App Tour">
+        <div class="tutorial-header">
+          <div class="tutorial-brand">
+            ${LOGO}
+            <span class="tutorial-logo-text">SIKAD</span>
+          </div>
+          <button class="tutorial-skip-btn" data-action="tutorialSkip" aria-label="${state.onboarded ? 'Close tour' : 'Skip tutorial'}">
+            ${state.onboarded ? 'Close' : 'Skip'}
+          </button>
+        </div>
+
+        <div class="tutorial-carousel" id="tutorial-carousel">
+          <div class="tutorial-slide" role="group" aria-roledescription="slide" aria-label="Slide ${ui.tutorialSlide + 1} of ${TUTORIAL_SLIDES.length}">
+            <div class="tutorial-art" aria-hidden="true">
+              ${s.svg}
+            </div>
+            <div class="tutorial-content">
+              <span class="tutorial-tagline">${esc(s.tagline)}</span>
+              <h1 class="tutorial-title">${esc(s.title)}</h1>
+              <p class="tutorial-desc">${esc(s.desc)}</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="tutorial-footer">
+          <div class="tutorial-dots" role="tablist" aria-label="Tutorial slide pagination">
+            ${TUTORIAL_SLIDES.map((slide, i) => `
+              <button class="tutorial-dot ${i === ui.tutorialSlide ? 'active' : ''}"
+                      role="tab"
+                      aria-selected="${i === ui.tutorialSlide}"
+                      aria-label="Go to slide ${i + 1}: ${esc(slide.title)}"
+                      data-action="tutorialGoto"
+                      data-slide="${i}">
+              </button>
+            `).join('')}
+          </div>
+
+          <div class="tutorial-nav">
+            ${ui.tutorialSlide > 0
+              ? `<button class="btn tutorial-prev-btn" data-action="tutorialPrev" aria-label="Previous slide">Back</button>`
+              : `<div class="tutorial-spacer"></div>`
+            }
+            ${!isLast
+              ? `<button class="btn primary tutorial-next-btn" data-action="tutorialNext">Next</button>`
+              : `<button class="btn primary tutorial-finish-btn" data-action="tutorialFinish">${state.onboarded ? 'Got it' : 'Get Started'}</button>`
+            }
+          </div>
+        </div>
+      </div>`;
+  }
+
   // ============================================================ ONBOARDING ==
   function onboarding() {
     const ob = ui.ob;
@@ -320,7 +618,7 @@
     const progress = ob.step > 0 && ob.step < 5
       ? `<div class="ob-progress"><div class="ob-bars" aria-hidden="true">${[1, 2, 3, 4].map((i) => `<span class="${i <= ob.step ? 'on' : ''}"></span>`).join('')}</div><span class="ob-step">Step ${ob.step} of 4</span></div>` : '';
     const body = [obWelcome, obBaseline, obLifestyle, obSync, obDump, obGenerating][ob.step]();
-    return `<div class="screen onboarding" data-step="${esc(steps[ob.step])}"><div class="ob-top">${themeToggle()}</div>${progress}${body}</div>`;
+    return `<div class="screen onboarding" data-step="${esc(steps[ob.step])}">${progress}${body}${isJudge() ? judgeDock() : ''}</div>`;
   }
 
   function obWelcome() {
@@ -335,7 +633,6 @@
           <input type="text" placeholder="Your name" data-bind="ob.name" value="${esc(ui.ob.name)}" autocomplete="given-name">
         </label>
         <button class="btn primary block" data-action="obNext">Get started</button>
-        <button class="demo-link" data-action="loadDemo"><span class="demo-tag">DEMO</span> Skip setup and load Alex's week (BSIT 3B)</button>
       </div>`;
   }
 
@@ -359,13 +656,13 @@
         <span class="upload-icon">${ICON.doc}</span>
         <span><b>Upload COR or schedule photo</b><br><small>PDF or image</small></span>
       </label>
-      ${ob.uploadNote ? `<p class="demo-note"><span class="demo-tag">DEMO</span> ${esc(ob.uploadNote)}</p>` : ''}
+      ${isJudge() && ob.uploadNote ? `<p class="demo-note"><span class="demo-tag">DEMO</span> ${esc(ob.uploadNote)}</p>` : ''}
       <details class="paste" ${ob.corText ? 'open' : ''}>
         <summary>Or paste or type it (one class per line)</summary>
         <textarea rows="6" data-bind="ob.corText" aria-label="Class schedule text" placeholder="IT 302   MON   07:00-10:00   FTF">${esc(ob.corText)}</textarea>
         <div class="row">
-          <button class="btn small" data-action="obSampleCor">Use sample COR</button>
-          <button class="btn small" data-action="obExtract">Extract classes</button>
+          ${isJudge() ? '<button class="btn small" data-action="obSampleCor">Use sample COR</button>' : ''}
+          <button class="btn small" data-action="obExtract" ${ob.extracting ? 'disabled aria-disabled="true"' : ''}>${ob.extracting ? '<span class="int-spinner" aria-hidden="true"></span> Extracting…' : 'Extract classes'}</button>
         </div>
       </details>
       ${ob.analysis ? (ob.analysisError
@@ -438,10 +735,10 @@
 
   function obSync() {
     return `
-      <h1 class="ob-title">Sync your world</h1>
-      <p class="ob-sub">Bring deadlines and events in from where they already live. This step is optional.</p>
+      <h1 class="ob-title">Bring in your due dates</h1>
+      <p class="ob-sub">Connect a calendar or class platform to import deadlines. Skip it if you prefer.</p>
       <div class="integrations">${D.INTEGRATIONS.map((i) => integrationRow(i)).join('')}</div>
-      <p class="demo-note"><span class="demo-tag">DEMO</span> Connections are simulated in this build.</p>
+      ${isJudge() ? '<p class="demo-note"><span class="demo-tag">DEMO</span> Connections are simulated in this build.</p>' : ''}
       <p class="small muted">You can always connect more platforms later in Settings.</p>
       <div class="ob-nav">
         <button class="btn ghost" data-action="obBack">Back</button>
@@ -450,9 +747,32 @@
   }
   const INT_ICON = { gcal: 'week', canvas: 'doc', teams: 'braindump', classroom: 'tasks' };
   function integrationRow(i) {
-    const on = !!state.integrations[i.id];
-    return `<div class="integration"><span class="int-icon" aria-hidden="true">${ICON[INT_ICON[i.id]] || ICON.doc}</span><div><b>${esc(i.name)}</b><br><small>${esc(i.desc)}</small></div>
-      <button class="btn small ${on ? 'connected' : ''}" aria-pressed="${on}" aria-label="${on ? 'Disconnect' : 'Connect'} ${esc(i.name)}" data-action="toggleIntegration" data-id="${i.id}">${on ? `${ICON.check} Connected` : 'Connect'}</button></div>`;
+    const st = getIntegrationState(i.id);
+    const status = st.status; // 'idle' | 'connecting' | 'connected' | 'error' | 'unavailable'
+    let info = '';
+    let btn = '';
+
+    if (status === 'connecting') {
+      info = `<b>${esc(i.name)}</b><br><small class="connecting-text"><span class="int-spinner" aria-hidden="true"></span> Connecting…</small>`;
+      btn = `<button class="btn small ghost" aria-label="Cancel connecting ${esc(i.name)}" data-action="cancelIntegration" data-id="${i.id}">Cancel</button>`;
+    } else if (status === 'connected') {
+      const syncInfo = st.lastSync ? esc(st.lastSync) : 'Connected';
+      const acct = st.account ? `<span class="int-account">${esc(st.account)}</span> · ` : '';
+      info = `<b>${esc(i.name)}</b><br><small class="int-meta">${acct}${syncInfo}</small>`;
+      btn = `<button class="btn small ghost danger-hover" aria-label="Disconnect ${esc(i.name)}" data-action="disconnectIntegration" data-id="${i.id}">Disconnect</button>`;
+    } else if (status === 'error') {
+      const errMsg = st.error ? esc(st.error) : 'Connection failed.';
+      info = `<b>${esc(i.name)}</b><br><small class="int-error" role="alert">${errMsg}</small>`;
+      btn = `<button class="btn small" aria-label="Try connecting ${esc(i.name)} again" data-action="connectIntegration" data-id="${i.id}">Try again</button>`;
+    } else if (status === 'unavailable') {
+      info = `<b>${esc(i.name)}</b><br><small class="muted">${esc(i.desc)}</small>`;
+      btn = `<button class="btn small ghost" disabled aria-disabled="true">Coming soon</button>`;
+    } else { // 'idle'
+      info = `<b>${esc(i.name)}</b><br><small class="muted">${esc(i.desc)}</small>`;
+      btn = `<button class="btn small" aria-label="Connect ${esc(i.name)}" data-action="connectIntegration" data-id="${i.id}">Connect</button>`;
+    }
+
+    return `<div class="integration" data-id="${i.id}" data-state="${status}"><span class="int-icon" aria-hidden="true">${ICON[i.icon] || ICON[INT_ICON[i.id]] || ICON.doc}</span><div class="int-info">${info}</div>${btn}</div>`;
   }
 
   function obDump() {
@@ -464,10 +784,10 @@
       ${dictaphone('ob.dumpText')}
       <label class="divider" for="dump-ob"><span>or type it out</span></label>
       <textarea id="dump-ob" rows="5" data-bind="ob.dumpText" placeholder="e.g. Database proposal due Friday, about 3 hours. Study for my math quiz on Wednesday…">${esc(ob.dumpText)}</textarea>
-      <button class="demo-link" data-action="obSampleDump"><span class="demo-tag">DEMO</span> Use Alex's example</button>
+      ${isJudge() ? '<button class="demo-link" data-action="obSampleDump"><span class="demo-tag">DEMO</span> Use Alex\'s example</button>' : ''}
       <div class="ob-nav">
         <button class="btn ghost" data-action="obBack">Back</button>
-        <button class="btn primary" data-action="obParseDump">Extract tasks</button>
+        <button class="btn primary" data-action="obParseDump" ${ob.parsingDump ? 'disabled aria-disabled="true"' : ''}>${ob.parsingDump ? '<span class="int-spinner" aria-hidden="true"></span> Extracting…' : 'Extract tasks'}</button>
       </div>`;
   }
 
@@ -556,13 +876,13 @@
       </div>`;
     }
     const note = d && d.note === 'transcribed' ? `<p class="voice-note">${ICON.check}<span>Transcribed by your browser. Check the text below before sending.</span></p>`
-      : d && d.note === 'demo' ? `<p class="voice-note"><span class="demo-tag">DEMO</span><span>Sample transcript inserted. It did not come from your microphone.</span></p>`
+      : d && d.note === 'demo' ? `<p class="voice-note">${isJudge() ? '<span class="demo-tag">DEMO</span>' : ''}<span>Sample transcript inserted. It did not come from your microphone.</span></p>`
       : d && d.note === 'cancelled' ? `<p class="voice-note">${ICON.info}<span>Recording cancelled. Nothing was added.</span></p>`
       : d && d.error ? `<p class="voice-note is-error" role="alert">${ICON.alert}<span>${esc(d.error)}</span></p>` : '';
     if (!speechSupported()) {
       return `<div class="dict unsupported">
         <p class="voice-note">${ICON.info}<span>Voice capture needs a browser with speech recognition (Chrome or Edge). This browser does not have it, so type below instead.</span></p>
-        <button class="demo-link" data-action="dictDemo" data-path="${path}"><span class="demo-tag">DEMO</span> Insert a sample transcript</button>
+        ${isJudge() ? `<button class="demo-link" data-action="dictDemo" data-path="${path}"><span class="demo-tag">DEMO</span> Insert a sample transcript</button>` : ''}
         ${note}
       </div>`;
     }
@@ -570,7 +890,7 @@
       <button class="mic" data-action="dictStart" data-path="${path}" aria-label="Start recording">${ICON.mic}</button>
       <div class="mic-label">Start recording</div>
       ${note}
-      ${d && d.error ? `<button class="demo-link" data-action="dictDemo" data-path="${path}"><span class="demo-tag">DEMO</span> Insert a sample transcript</button>` : ''}
+      ${isJudge() && d && d.error ? `<button class="demo-link" data-action="dictDemo" data-path="${path}"><span class="demo-tag">DEMO</span> Insert a sample transcript</button>` : ''}
     </div>`;
   }
   /**
@@ -632,14 +952,68 @@
 
 
   // ============================================================== APP SHELL ==
+  function judgeDock() {
+    if (!isJudge()) return '';
+    const isOpen = !!ui.judgeDockOpen;
+    const obStep = !state.onboarded ? ui.ob.step : -1;
+    let sampleButtons = '';
+    if (obStep === 0) {
+      sampleButtons = '<button class="btn small" data-action="loadDemo">Load Alex\'s week</button>';
+    } else if (obStep === 1) {
+      sampleButtons = '<button class="btn small" data-action="obSampleCor">Use sample COR</button>';
+    } else if (obStep === 4) {
+      sampleButtons = '<button class="btn small" data-action="obSampleDump">Use Alex\'s example</button>';
+    }
+    const dictShortcut = (ui.dict || ui.sheet) ? `<button class="btn small" data-action="dictDemo" data-path="${ui.sheet ? 'sheet.text' : 'ob.dumpText'}">Sample transcript</button>` : '';
+    const focusSkipShortcut = (state.active && state.active.status === 'running') ? '<button class="btn small" data-action="focusSkip" data-mins="5">Skip 5m</button>' : '';
+
+    return `
+      <div class="judge-dock" id="judge-dock">
+        ${isOpen ? `
+          <div class="judge-dock-panel" role="region" aria-label="Judge tools panel">
+            <div class="judge-dock-header">
+              <span class="judge-title">Judge tools</span>
+              <button class="icon-btn small" data-action="toggleJudgeDock" aria-label="Close judge tools">${ICON.close}</button>
+            </div>
+            <div class="judge-dock-section">
+              <span class="judge-label">Clock (${T.DAY_SHORT[T.dow(now())]} ${T.time(now())})</span>
+              <div class="judge-clock-row">
+                <button class="clock-step" data-action="advance" data-mins="15" aria-label="Advance 15 minutes">+15m</button>
+                <button class="clock-step" data-action="advance" data-mins="60" aria-label="Advance 1 hour">+1h</button>
+                <button class="clock-step" data-action="nextMorning" aria-label="Next day">Next day</button>
+                <button class="clock-step" data-action="openClock" aria-label="Set demo clock">Set time</button>
+              </div>
+            </div>
+            <div class="judge-dock-section judge-actions-row">
+              <button class="btn small" data-action="loadDemo">Load Alex's week</button>
+              <button class="btn small" data-action="loadDemoConfirm">Reset demo</button>
+              <button class="btn small ghost" data-action="openEngine">View engine JSON</button>
+            </div>
+            ${sampleButtons || dictShortcut || focusSkipShortcut ? `
+              <div class="judge-dock-section">
+                <span class="judge-label">Shortcuts</span>
+                <div class="judge-actions-row">
+                  ${sampleButtons}
+                  ${dictShortcut}
+                  ${focusSkipShortcut}
+                </div>
+              </div>` : ''}
+          </div>` : ''}
+        <button class="judge-dock-toggle" data-action="toggleJudgeDock" aria-expanded="${isOpen}">
+          <span>Judge tools</span>
+        </button>
+      </div>`;
+  }
+
   function shell() {
     const views = { home: homeView, week: weekView, tasks: tasksView, profile: profileView };
     return `
       <div class="screen app">
         <button class="skip-link" data-action="skipToMain">Skip to main content</button>
-        ${clockBar()}
+        ${isJudge() ? judgeDock() : ''}
         <main class="view" id="main" tabindex="-1">${views[ui.tab]()}</main>
         <nav class="bottom-nav" aria-label="Main">
+          <div class="rail-brand" aria-hidden="true">${LOGO}<span class="rail-title">SIKAD</span></div>
           ${navBtn('home', 'Home', ICON.home)}
           ${navBtn('week', 'Overview', ICON.week)}
           <button class="fab" data-action="openDump" aria-label="Ask SIKAD: ask about your plan, add a task or report a change"><span class="fab-circle">${ICON.braindump}</span><span class="fab-label">Ask SIKAD</span></button>
@@ -665,31 +1039,36 @@
   // ------------------------------------------------------------------ HOME --
   function homeView() {
     if (ui.focusOnly) {
-      return `<header class="home-head">${themeToggle()}<div class="eyebrow">${T.date(now())}</div><h1>One thing at a time</h1></header>
+      return `<header class="home-head"><div class="eyebrow">${T.date(now())}</div><h1>One thing at a time</h1></header>
         ${focusCard()}
         <button class="btn ghost block" data-action="showFullPlan" data-flip="full-plan">Show my full plan</button>`;
     }
     return `
-      <header class="home-head">${themeToggle()}
+      <header class="home-head">
         <div class="eyebrow">${T.date(now())}</div>
         <h1>Hey, ${esc(state.user.name || 'there')}</h1>
       </header>
       ${updateCard()}
       ${checkinCards()}
-      ${focusCard()}
-      <div id="attention" tabindex="-1">${attentionBlock()}</div>
-      ${weekCard()}
-      ${fitCard()}
-      <section class="section">
-        <div class="section-head" data-flip="tl-head">
-          <h2>${ui.dayView === 'today' ? "Today's timeline" : "Tomorrow's preview"}</h2>
-          <div class="seg" role="tablist" aria-label="Day to show">
-            <button role="tab" aria-selected="${ui.dayView === 'today'}" class="${ui.dayView === 'today' ? 'on' : ''}" data-action="dayView" data-v="today">Today</button>
-            <button role="tab" aria-selected="${ui.dayView === 'tomorrow'}" class="${ui.dayView === 'tomorrow' ? 'on' : ''}" data-action="dayView" data-v="tomorrow">Tomorrow</button>
-          </div>
+      <div class="home-cols">
+        <div class="home-col-left">
+          ${focusCard()}
+          <div id="attention" tabindex="-1">${attentionBlock()}</div>
+          ${weekCard()}
         </div>
-        ${timeline(T.dayStart(now()) + (ui.dayView === 'tomorrow' ? T.DAY : 0))}
-      </section>`;
+        <div class="home-col-right">
+          <section class="section">
+            <div class="section-head" data-flip="tl-head">
+              <h2>${ui.dayView === 'today' ? "Today's timeline" : "Tomorrow's preview"}</h2>
+              <div class="seg" role="tablist" aria-label="Day to show">
+                <button role="tab" aria-selected="${ui.dayView === 'today'}" class="${ui.dayView === 'today' ? 'on' : ''}" data-action="dayView" data-v="today">Today</button>
+                <button role="tab" aria-selected="${ui.dayView === 'tomorrow'}" class="${ui.dayView === 'tomorrow' ? 'on' : ''}" data-action="dayView" data-v="tomorrow">Tomorrow</button>
+              </div>
+            </div>
+            ${timeline(T.dayStart(now()) + (ui.dayView === 'tomorrow' ? T.DAY : 0))}
+          </section>
+        </div>
+      </div>`;
   }
 
   const ACTION_WORD = { RESCHEDULE: 'Moved', SCHEDULE: 'Added', COMPLETE: 'Completed', CANCEL: 'Removed', UNSCHEDULED: "Couldn't fit" };
@@ -706,9 +1085,20 @@
     return `<span class="ch-title">${esc(c.title)}</span><span class="ch-detail num">${detail}</span><span class="chip ch-${c.action.toLowerCase()}">${resized ? 'Resized' : ACTION_WORD[c.action] || c.action}</span>`;
   }
 
+  let updateDismissTimer = null;
   function updateCard() {
     const u = state.lastUpdate;
-    if (!u) return '';
+    if (!u) {
+      if (updateDismissTimer) { clearTimeout(updateDismissTimer); updateDismissTimer = null; }
+      return '';
+    }
+    if (!updateDismissTimer) {
+      updateDismissTimer = setTimeout(() => {
+        state.lastUpdate = null;
+        updateDismissTimer = null;
+        render();
+      }, 8000);
+    }
     const next = E.nextSession(state.plan, now());
     const shown = u.changes.slice(0, 6);
     const short = u.status === 'INFEASIBLE';
@@ -723,7 +1113,6 @@
         ${short ? `<p class="small upd-warn">${ICON.hourglass}<span>Some work doesn't fit. See "Not enough time" below.</span></p>` : ''}
         <p class="small upd-fixed">${ICON.lock}<span>Fixed commitments unchanged${skipped ? ', except the one you chose to cancel or skip' : ''}.</span></p>
         ${next ? `<p class="small upd-next">${ICON.step}<span>Next: <b>${esc(next.title)}</b> · <span class="num">${T.rel(next.start, now())} ${T.timeShort(next.start)}</span></span></p>` : ''}
-        ${undoSnap ? `<div class="row end"><button class="btn small" data-action="undo">${ICON.undo} Undo this change</button></div>` : ''}
       </section>`;
   }
 
@@ -760,9 +1149,14 @@
     const beforeNext = E.occurrences(state, T.dayStart(n)).find((o) => !o.soft && o.start > n && o.start < next.start);
     const startsNow = next.start <= n + 15 * T.MIN;
     const why = E.explain(state, state.plan, next, n);
-    const sessionTag = next.sessions > 1 ? `<span class="chip">Session ${next.session}/${next.sessions}</span>` : '';
-    const longTag = next.mins >= 90 ? '<span class="chip">Long session</span>' : '';
     const durLabel = task && task.isAiEstimate ? `<span class="est-dur">≈ ${T.dur(next.mins)}</span>` : T.dur(next.mins);
+    const sessionMeta = next.sessions > 1 ? ` · Session ${next.session}/${next.sessions}` : '';
+    const longMeta = next.mins >= 90 ? ' · Long session' : '';
+    const focusChips = [];
+    if (task && task.source) focusChips.push(`<span class="chip src-chip">${esc(task.source)}</span>`);
+    if (task && task.context) focusChips.push(`<span class="chip">${esc(task.context)}</span>`);
+    if (task) focusChips.push(priChip(task.priority));
+    if (task && task.isAiEstimate && focusChips.length < 3) focusChips.push(estChip());
     return `
       <section class="focus ${active ? 'active' : ''}" aria-labelledby="focus-title" data-flip="focus" data-sid="${esc(next.id)}">
         <div class="focus-head" data-enter="fh:${esc(next.id)}">
@@ -770,11 +1164,11 @@
         ${nowFixed && !active ? `<div class="focus-now">${ICON.lock}<span>Right now: ${esc(nowFixed.title)} until <span class="num">${T.timeShort(nowFixed.end)}</span></span></div>` : ''}
         <h2 id="focus-title" tabindex="-1"><span class="strike">${!active && startsNow && !STARTS_WITH_VERB.test(main) ? 'Start ' : ''}${esc(main)}</span></h2>
         ${part ? `<div class="focus-part"><span class="strike">— ${esc(part)}</span></div>` : ''}
-        <div class="focus-time num">${ICON.clock}<span><span class="nowrap">${T.rel(next.start, n)} · ${T.range(next.start, next.end)}</span> · <span class="nowrap">${durLabel}</span></span></div>
-        <div class="focus-tags">${task && task.context ? `<span class="chip">${esc(task.context)}</span>` : ''}${task ? priChip(task.priority) : ''}${sessionTag}${longTag}${task && task.isAiEstimate ? estChip() : ''}</div>
+        <div class="focus-time num">${ICON.clock}<span><span class="nowrap">${T.rel(next.start, n)} · ${T.range(next.start, next.end)}</span> · <span class="nowrap">${durLabel}</span>${sessionMeta}${longMeta}</span></div>
+        <div class="focus-tags">${focusChips.slice(0, 3).join('')}</div>
         ${beforeNext && !active ? `<div class="focus-before">${ICON.lock}<span>Before that: ${esc(beforeNext.title)} · <span class="num">${T.range(beforeNext.start, beforeNext.end)}</span></span></div>` : ''}
         </div>
-        ${active ? focusActive(next, task) : ui.focusPick === next.id ? focusPicker(next, task) : `<div data-enter="fm:idle:${esc(next.id)}">
+        ${ui.focusPick === next.id ? focusPicker(next, task) : active ? focusActive(next, task) : `<div data-enter="fm:idle:${esc(next.id)}">
           ${why ? `<div class="why"><b>Why this?</b> ${esc(why)}</div>` : ''}
           <div class="focus-actions">
             <button class="btn primary" data-action="start" data-id="${next.id}">${ICON.play} Start task</button>
@@ -804,8 +1198,9 @@
   /** Step 1 of Focus Mode: suggest a working method, explain why, and let the student pick another or none. */
   function focusPicker(session, task) {
     const rec = F.recommend(focusContext(session, task));
-    const chosen = ui.focusMethod || rec.method;
+    const chosen = ui.focusMethod || (state.active ? state.active.method : rec.method);
     const last = state.prefs.focusMethod;
+    const inProgress = state.active && state.active.sessionId === session.id;
     return `
       <div class="method" role="group" aria-labelledby="method-title" data-enter="fm:picker">
         <div class="method-rec">
@@ -821,8 +1216,11 @@
         </div>
         <p class="method-note">A suggestion from this session's length and your schedule. Pick whatever suits you.</p>
         <div class="focus-actions">
-          <button class="btn primary" data-action="focusBegin" data-id="${session.id}">${ICON.play} Start session</button>
-          <button class="btn on-dark" data-action="focusCancel">Back</button>
+          ${inProgress
+            ? `<button class="btn primary" data-action="focusApplyMethod" data-id="${session.id}">${ICON.check} Apply method</button>
+               <button class="btn on-dark" data-action="focusCancel">Back to session</button>`
+            : `<button class="btn primary" data-action="focusBegin" data-id="${session.id}">${ICON.play} Start session</button>
+               <button class="btn on-dark" data-action="focusCancel">Back</button>`}
         </div>
       </div>`;
   }
@@ -858,7 +1256,7 @@
     const paused = a.status === 'paused';
     return `
       <div class="session" data-enter="fm:session">
-        <div class="session-method"><b>${esc(m.name)}</b><span id="focus-phase">${esc(paused ? 'Paused' : t.label)}</span></div>
+        <div class="session-method"><span>Method: <b>${esc(m.name)}</b> · <button class="link on-dark-link" data-action="openFocusPicker" data-id="${session.id}">Change</button></span><span id="focus-phase">${esc(paused ? 'Paused' : t.label)}</span></div>
         <div class="timer-row"><span id="focus-timer" class="num" role="timer" aria-label="${t.remainingMs == null ? 'Time focused' : 'Time left'}">${F.clock(t.remainingMs == null ? t.elapsedMs : t.remainingMs)}</span>
           <span class="timer-note">${t.remainingMs == null ? 'focused so far' : t.phase === 'break' ? 'of break left' : 'left'}</span></div>
         ${steps ? `<ol class="session-steps">${steps.map((st) => `<li>${esc(st.title)} <span class="num">${T.dur(st.mins)}</span></li>`).join('')}</ol>` : ''}
@@ -869,7 +1267,7 @@
           <button class="btn on-dark" data-action="focusEnd" aria-label="Stop early: end this session and say how it went">Stop early</button>
         </div>
         <button class="link on-dark-link spot-toggle" data-action="spotlightToggle" aria-pressed="${!ui.spotlightOff}">${ui.spotlightOff ? 'Dim everything else' : 'Show my plan'}</button>
-        <button class="demo-skip" data-action="focusSkip" data-mins="5"><span class="demo-tag">DEMO</span> Skip ahead 5 min</button>
+        ${isJudge() ? '<button class="demo-skip" data-action="focusSkip" data-mins="5"><span class="demo-tag">DEMO</span> Skip ahead 5 min</button>' : ''}
       </div>`;
   }
 
@@ -931,20 +1329,22 @@
    */
   function weekCard() {
     const w = S.weeklyProgress(state);
-    const outcomeWord = { complete: 'Completed', partial: 'Partly done', unfinished: 'Not finished yet' };
-    const nextWeekMins = state.plan.filter((x) => x.start >= w.weekEnd).reduce((a, x) => a + x.mins, 0);
+    const cap = E.capacity(state, now());
+    const short = cap.required > cap.free;
+    const unsched = (state.unscheduled || []).length > 0;
+    const verdict = short ? `${T.dur(cap.required - cap.free)} short` : unsched ? 'Not all fits' : 'Fits';
     const from = ui.prevPct == null ? w.percent : ui.prevPct;
     const sessions = state.focusLog.slice(-5).reverse();
     const win = ui.celebrate;
+    const outcomeWord = { complete: 'Completed', partial: 'Partly done', unfinished: 'Not finished yet' };
+    const totalHrs = w.totalMins ? T.dur(w.totalMins) : '0 hrs';
+    const doneHrs = T.dur(w.doneMins);
+    const summaryLine = `${doneHrs} of ${totalHrs} done · ${w.focusSessions} session${w.focusSessions === 1 ? '' : 's'} · ${verdict}`;
     return `
       <section class="card week ${win ? 'win' : ''}" aria-labelledby="week-title" data-flip="week">
         <div class="fit-head"><h2 id="week-title">This week</h2>${w.totalMins ? `<span class="week-pct num">${win ? ICON.check : ''}${w.percent}%</span>` : ''}</div>
-        ${w.totalMins ? `
-          <div class="bar week-bar" role="img" aria-label="${T.dur(w.doneMins)} done of ${T.dur(w.totalMins)} planned this week"><span style="--from:${from}%;width:${w.percent}%"></span></div>
-          <p class="small num week-line"><b>${T.dur(w.doneMins)}</b> done of <b>${T.dur(w.totalMins)}</b> planned this week${w.tasksDone ? ` · <b>${w.tasksDone}</b> task${w.tasksDone === 1 ? '' : 's'} finished` : ''}</p>`
-        : `<p class="small week-line">No work is planned for the rest of this week${nextWeekMins ? `. Next week has <b class="num">${T.dur(nextWeekMins)}</b> planned` : ''}.</p>`}
-        <p class="small num week-line"><b>${w.focusSessions}</b> focus session${w.focusSessions === 1 ? '' : 's'} this week${w.focusedMins ? ` · ${T.dur(w.focusedMins)} focused` : ''}</p>
-        <p class="small muted">Done work compared with what is planned for Monday to Sunday right now. Moving work to another day changes the plan, not your progress.</p>
+        <div class="bar week-bar" role="img" aria-label="${T.dur(w.doneMins)} done of ${T.dur(w.totalMins)} planned this week"><span style="--from:${from}%;width:${w.percent}%"></span></div>
+        <p class="small num week-line"><b>${esc(summaryLine)}</b></p>
         ${sessions.length ? `<details class="session-log"><summary>${ICON.chevron}Recent focus sessions (${state.focusLog.length})</summary>
           <ul class="plain small num">${sessions.map((f) => `<li><span><b>${esc(f.title)}</b><br>${T.short(f.at)} · ${esc((F.METHODS[f.method] || F.METHODS.none).name)} · ${T.dur(Math.max(1, f.focusedMins))} focused · ${outcomeWord[f.outcome] || f.outcome}</span></li>`).join('')}</ul></details>` : ''}
       </section>`;
@@ -1041,6 +1441,7 @@
       if (state.active && state.active.sessionId === it.session.id) chips += '<span class="chip live">In progress</span>';
       else if (isNext) chips += '<span class="chip now">Next</span>';
       if (moved) chips += '<span class="chip moved">Moved</span>';
+      if (t && t.source) chips += `<span class="chip src-chip">${esc(t.source)}</span>`;
       if (t) chips += priChip(t.priority);
       if (est) chips += estChip();
       label = `${it.title}, task${est ? ', AI estimate' : ''}, ${range}`;
@@ -1083,7 +1484,7 @@
     const pct = cap.free ? Math.min(100, Math.round((cap.required / cap.free) * 100)) : 100;
     const compact = (m) => (m ? `${Math.round((m / 60) * 10) / 10}h` : '—');
     return `
-      <header class="home-head">${themeToggle()}<div class="eyebrow">Next 7 days</div><h1>Overview</h1></header>
+      <header class="home-head"><h1>Overview</h1></header>
       <section class="card fit" aria-labelledby="cap-title" data-flip="cap">
         <div class="fit-head"><h2 id="cap-title">Available vs. required</h2><span class="fit-verdict ${over ? 'bad' : 'good'}">${over ? `${ICON.alert}Over capacity` : `${ICON.check}Fits`}</span></div>
         <div class="bar ${over ? 'over' : ''}" role="img" aria-label="${T.dur(cap.required)} of tasks against ${approx(cap.free)} of usable time"><span style="width:${pct}%"></span></div>
@@ -1112,7 +1513,7 @@
     const upcoming = open.filter((t) => !attention.includes(t)).sort((a, b) => a.deadline - b.deadline);
     const done = state.tasks.filter((t) => t.status === 'done');
     return `
-      <header class="home-head">${themeToggle()}<div class="eyebrow">${open.length} open · ${done.length} done</div><h1>Tasks</h1></header>
+      <header class="home-head"><h1>Tasks</h1></header>
       <button class="btn block" data-action="newTask">${ICON.plus} Add a task manually</button>
       ${attention.length ? `<h2 class="list-h" data-flip="lh:attention">Needs attention</h2>${attention.map(taskCard).join('')}` : ''}
       ${upcoming.length ? `<h2 class="list-h" data-flip="lh:next">Up next</h2>${upcoming.map(taskCard).join('')}` : ''}
@@ -1132,7 +1533,7 @@
     const est = t.isAiEstimate ? `<span class="est-dur">≈ ${T.dur(total)}</span> ${estChip()}` : T.dur(total);
     return `
       <button class="task-card ${t.status}" data-action="openTask" data-id="${t.id}" data-flip="t:${t.id}">
-        <div class="tc-head"><h3><span class="tc-icon" aria-hidden="true">${t.status === 'done' ? ICON.check : ICON.task}</span>${esc(t.title)}</h3>${t.status === 'done' ? '' : priChip(t.priority)}</div>
+        <div class="tc-head"><h3><span class="tc-icon" aria-hidden="true">${t.status === 'done' ? ICON.check : ICON.task}</span>${esc(t.title)}</h3>${t.source ? `<span class="chip src-chip">${esc(t.source)}</span>` : ''}${t.status === 'done' ? '' : priChip(t.priority)}</div>
         ${t.context ? `<div class="tc-context">${esc(t.context)}</div>` : ''}
         <dl class="tc-meta num">
           <div><dt>${isExam ? 'Exam' : 'Due'}</dt><dd class="${overdue ? 'overdue' : ''}">${overdue ? `${ICON.alert}<b>Overdue</b> · ` : ''}${t.deadline != null ? (isExam ? T.short(t.deadline) : `${T.short(t.deadline)}, ${T.time(t.deadline)}`) : 'Not set'}</dd></div>
@@ -1152,72 +1553,126 @@
       for (let m = from; m <= to; m += 30) { const hm = T.minsToHm(m); o += `<option value="${hm}" ${hm === sel ? 'selected' : ''}>${T.hmLabel(hm)}</option>`; }
       return o;
     };
-    const classes = b.classes.slice().sort((a, c) => ((a.day + 6) % 7) - ((c.day + 6) % 7) || T.hmToMins(a.start) - T.hmToMins(c.start));
+    const daysOrder = [1, 2, 3, 4, 5, 6, 0];
+    const dayGroups = daysOrder.map((d) => {
+      const dayClasses = b.classes
+        .filter((c) => c.day === d)
+        .sort((a, b) => T.hmToMins(a.start) - T.hmToMins(b.start));
+      if (!dayClasses.length) return null;
+      const totalMins = dayClasses.reduce((sum, c) => sum + (T.hmToMins(c.end) - T.hmToMins(c.start)), 0);
+      const countLabel = `${dayClasses.length} ${dayClasses.length === 1 ? 'class' : 'classes'}`;
+      const hrsLabel = T.dur(totalMins);
+      return {
+        day: d,
+        dayName: T.DAY_NAMES[d],
+        header: `${T.DAY_NAMES[d]} · ${countLabel} · ${hrsLabel}`,
+        classes: dayClasses,
+      };
+    }).filter(Boolean);
     const upcomingEvents = state.events.filter((e) => e.end > now()).sort((a, c) => a.start - c.start);
     return `
-      <header class="home-head">${themeToggle()}<div class="eyebrow">Profile & settings</div><h1>${esc(state.user.name || 'You')}</h1></header>
-      <section class="card settings">
-        <h2>Your day</h2>
-        <div class="grid2">
-          <label>Day starts<select data-setting="dayStart">${timeOpts(b.dayStart, 240, 600)}</select></label>
-          <label>Latest scheduling<select data-setting="dayEnd">${timeOpts(b.dayEnd, 1140, 1410)}</select></label>
-          <label>Commute (FTF days)<select data-setting="commuteMins" data-type="int">${[0, 15, 30, 45, 60, 75, 90, 120].map((m) => `<option value="${m}" ${m === b.commuteMins ? 'selected' : ''}>${m ? T.dur(m) : 'None'}</option>`).join('')}</select></label>
-          <label>Morning routine<select data-setting="routineMins" data-type="int">${[0, 15, 30, 45, 60].map((m) => `<option value="${m}" ${m === b.routineMins ? 'selected' : ''}>${m ? T.dur(m) : 'None'}</option>`).join('')}</select></label>
+      <header class="home-head"><h1>${esc(state.user.name || 'You')}</h1></header>
+      ${appearanceCard()}
+      <div class="profile-cols">
+        <div class="profile-col-left">
+          <section class="card settings sec-classes">
+            <div class="list-head"><h2>Class schedule</h2><span class="fixed-tag">${ICON.lock}Fixed</span></div>
+            ${dayGroups.length ? dayGroups.map((g) => `
+              <h3 class="class-day-header">${esc(g.header)}</h3>
+              <ul class="plain fixed-list">
+                ${g.classes.map((c) => `
+                  <li>
+                    <span class="num">${ICON.lock}<b>${esc(c.title)}</b> · ${T.hmLabel(c.start)}–${T.hmLabel(c.end)} · <small class="muted">${c.mode === 'FTF' ? 'Face-to-face' : 'Online'}</small></span>
+                    <button class="remove-btn" aria-label="Remove ${esc(c.title)} on ${esc(g.dayName)}" data-action="removeClass" data-id="${c.id}">Remove</button>
+                  </li>
+                `).join('')}
+              </ul>
+            `).join('') : '<p class="muted">No classes.</p>'}
+            <details class="add"><summary>${ICON.plus}Add a class</summary>
+              <div class="grid2 add-form" id="add-class">
+                <label>Subject<input name="title" placeholder="e.g. IT 302"></label>
+                <label>Day<select name="day">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<option value="${d}">${T.DAY_NAMES[d]}</option>`).join('')}</select></label>
+                <label>Start<input type="time" name="start" value="08:00"></label>
+                <label>End<input type="time" name="end" value="10:00"></label>
+                <label>Mode<select name="mode"><option>FTF</option><option>Online</option></select></label>
+                <button class="btn small" data-action="addClass">Add class</button>
+              </div>
+            </details>
+          </section>
         </div>
-        <label class="toggle"><input type="checkbox" data-setting="protectLunch" ${b.protectLunch ? 'checked' : ''}> Protect a lunch hour (12–1 PM) when free</label>
-        <p class="small muted">SIKAD keeps a ${b.bufferMins}-minute transition buffer around every task. Changes here recalculate your plan, and you can undo them.</p>
-      </section>
+        <div class="profile-col-right">
+          <section class="card settings sec-your-day">
+            <h2>Your day</h2>
+            <div class="grid2">
+              <label>Day starts<select data-setting="dayStart">${timeOpts(b.dayStart, 240, 600)}</select></label>
+              <label>Latest scheduling<select data-setting="dayEnd">${timeOpts(b.dayEnd, 1140, 1410)}</select></label>
+              <label>Commute (FTF days)<select data-setting="commuteMins" data-type="int">${[0, 15, 30, 45, 60, 75, 90, 120].map((m) => `<option value="${m}" ${m === b.commuteMins ? 'selected' : ''}>${m ? T.dur(m) : 'None'}</option>`).join('')}</select></label>
+              <label>Morning routine<select data-setting="routineMins" data-type="int">${[0, 15, 30, 45, 60].map((m) => `<option value="${m}" ${m === b.routineMins ? 'selected' : ''}>${m ? T.dur(m) : 'None'}</option>`).join('')}</select></label>
+            </div>
+            <label class="toggle"><input type="checkbox" data-setting="protectLunch" ${b.protectLunch ? 'checked' : ''}> Protect a lunch hour (12–1 PM) when free</label>
+            <p class="small muted">SIKAD keeps a ${b.bufferMins}-minute transition buffer around every task. Changes here recalculate your plan, and you can undo them.</p>
+          </section>
 
-      <section class="card settings">
-        <div class="list-head"><h2>Class schedule</h2><span class="fixed-tag">${ICON.lock}Fixed</span></div>
-        <ul class="plain fixed-list">${classes.map((c) => `<li><span class="num">${ICON.lock}<b>${esc(c.title)}</b> · ${T.DAY_SHORT[c.day]} ${T.hmLabel(c.start)}–${T.hmLabel(c.end)} · ${c.mode === 'FTF' ? 'Face-to-face' : 'Online'}</span><button class="icon-btn" aria-label="Remove ${esc(c.title)} on ${T.DAY_NAMES[c.day]}" data-action="removeClass" data-id="${c.id}">${ICON.close}</button></li>`).join('') || '<li class="muted">No classes.</li>'}</ul>
-        <details class="add"><summary>${ICON.plus}Add a class</summary>
-          <div class="grid2 add-form" id="add-class">
-            <label>Subject<input name="title" placeholder="e.g. IT 302"></label>
-            <label>Day<select name="day">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<option value="${d}">${T.DAY_NAMES[d]}</option>`).join('')}</select></label>
-            <label>Start<input type="time" name="start" value="08:00"></label>
-            <label>End<input type="time" name="end" value="10:00"></label>
-            <label>Mode<select name="mode"><option>FTF</option><option>Online</option></select></label>
-            <button class="btn small" data-action="addClass">Add class</button>
-          </div>
-        </details>
-      </section>
+          <section class="card settings sec-recurring">
+            <div class="list-head"><h2>Recurring commitments</h2><span class="fixed-tag">${ICON.lock}Fixed</span></div>
+            <ul class="plain fixed-list">${b.recurring.map((r) => `<li><span class="num">${ICON.lock}<b>${esc(r.title)}</b> · Weekly · ${T.DAY_NAMES[r.day]} ${T.hmLabel(r.start)}–${T.hmLabel(r.end)}</span><button class="remove-btn" aria-label="Remove ${esc(r.title)}" data-action="removeRecurring" data-id="${r.id}">Remove</button></li>`).join('') || '<li class="muted">None yet.</li>'}</ul>
+            <details class="add"><summary>${ICON.plus}Add a weekly commitment</summary>
+              <div class="grid2 add-form" id="add-rec">
+                <label>Name<input name="title" placeholder="e.g. Org meeting"></label>
+                <label>Type<select name="kind"><option value="work">Work</option><option value="org">Organization</option><option value="event">Other</option></select></label>
+                <label>Day<select name="day">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<option value="${d}">${T.DAY_NAMES[d]}</option>`).join('')}</select></label>
+                <label>Start<input type="time" name="start" value="17:00"></label>
+                <label>End<input type="time" name="end" value="19:00"></label>
+                <button class="btn small" data-action="addRecurringForm">Add</button>
+              </div>
+            </details>
+            ${upcomingEvents.length ? `<h3>One-time commitments</h3><ul class="plain fixed-list">${upcomingEvents.map((e) => `<li><span class="num">${ICON.lock}<b>${esc(e.title)}</b> · One-time · ${T.short(e.start)} ${T.range(e.start, e.end)}</span><button class="remove-btn" aria-label="Remove ${esc(e.title)}" data-action="removeEvent" data-id="${e.id}">Remove</button></li>`).join('')}</ul>` : ''}
+            ${state.cancellations.length ? `<h3>Cancelled sessions</h3><ul class="plain">${state.cancellations.map((c) => `<li><span>${esc(cancellationLabel(c))}</span><button class="btn small" data-action="restoreOcc" data-id="${esc(c)}" aria-label="Restore ${esc(cancellationLabel(c))}">Restore</button></li>`).join('')}</ul>` : ''}
+          </section>
 
-      <section class="card settings">
-        <div class="list-head"><h2>Recurring commitments</h2><span class="fixed-tag">${ICON.lock}Fixed</span></div>
-        <ul class="plain fixed-list">${b.recurring.map((r) => `<li><span class="num">${ICON.lock}<b>${esc(r.title)}</b> · Weekly · ${T.DAY_NAMES[r.day]} ${T.hmLabel(r.start)}–${T.hmLabel(r.end)}</span><button class="icon-btn" aria-label="Remove ${esc(r.title)}" data-action="removeRecurring" data-id="${r.id}">${ICON.close}</button></li>`).join('') || '<li class="muted">None yet.</li>'}</ul>
-        <details class="add"><summary>${ICON.plus}Add a weekly commitment</summary>
-          <div class="grid2 add-form" id="add-rec">
-            <label>Name<input name="title" placeholder="e.g. Org meeting"></label>
-            <label>Type<select name="kind"><option value="work">Work</option><option value="org">Organization</option><option value="event">Other</option></select></label>
-            <label>Day<select name="day">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<option value="${d}">${T.DAY_NAMES[d]}</option>`).join('')}</select></label>
-            <label>Start<input type="time" name="start" value="17:00"></label>
-            <label>End<input type="time" name="end" value="19:00"></label>
-            <button class="btn small" data-action="addRecurringForm">Add</button>
-          </div>
-        </details>
-        ${upcomingEvents.length ? `<h3>One-time commitments</h3><ul class="plain fixed-list">${upcomingEvents.map((e) => `<li><span class="num">${ICON.lock}<b>${esc(e.title)}</b> · One-time · ${T.short(e.start)} ${T.range(e.start, e.end)}</span><button class="icon-btn" aria-label="Remove ${esc(e.title)}" data-action="removeEvent" data-id="${e.id}">${ICON.close}</button></li>`).join('')}</ul>` : ''}
-        ${state.cancellations.length ? `<h3>Cancelled sessions</h3><ul class="plain">${state.cancellations.map((c) => `<li><span>${esc(cancellationLabel(c))}</span><button class="btn small" data-action="restoreOcc" data-id="${esc(c)}" aria-label="Restore ${esc(cancellationLabel(c))}">Restore</button></li>`).join('')}</ul>` : ''}
-      </section>
+          <section class="card settings sec-integrations">
+            <h2>Connected platforms</h2>
+            <div class="integrations">${D.INTEGRATIONS.map(integrationRow).join('')}</div>
+            ${isJudge() ? '<p class="demo-note"><span class="demo-tag">DEMO</span> Connections are simulated in this build.</p>' : ''}
+          </section>
 
-      <section class="card settings">
-        <h2>Connected platforms</h2>
-        <div class="integrations">${D.INTEGRATIONS.map(integrationRow).join('')}</div>
-        <p class="demo-note"><span class="demo-tag">DEMO</span> Connections are simulated in this build.</p>
-      </section>
+          <section class="card settings sec-limits">
+            <h2>How SIKAD plans & its limits</h2>
+            <ul class="plain limits-list">
+              <li>SIKAD plans your time. It doesn't do your schoolwork or write graded work for you.</li>
+              <li>It isn't a counselor or a health tool, and it doesn't judge your stress. If things feel like too much, talk to someone you trust or your school's guidance office.</li>
+              <li>Times marked ≈ are guesses. Change them anytime.</li>
+              <li>A plan isn't a promise. SIKAD can't guarantee grades or that everything fits. It shows you when it doesn't.</li>
+              <li>Your classes and fixed commitments never move unless you change them. You decide.</li>
+              <li>Your data stays on this device, unless you connect an account.</li>
+            </ul>
+          </section>
 
-      <section class="card settings demo-section">
-        <div class="list-head"><h2>Under the hood</h2><span class="demo-tag">DEMO</span></div>
-        <p class="small">Every extraction and replan produces the JSON contract from prompt.md (Phase 1–3).</p>
-        <button class="btn block" data-action="openEngine">View engine output (JSON)</button>
-        <button class="btn block" data-action="loadDemoConfirm">Reset demo to the initial scenario</button>
-      </section>
+          <section class="card settings sec-guide">
+            <div class="list-head">
+              <h2>App guide & tutorial</h2>
+              <span class="fixed-tag" style="background:var(--sage-tint); color:var(--forest);">${ICON.step}4 slides</span>
+            </div>
+            <p class="small">Review how SIKAD works: fixed baseline protection, the single-task Focus Card, and guilt-free replanning.</p>
+            <button class="btn block" data-action="openTutorial">${ICON.play}Revisit app tour</button>
+          </section>
 
-      <section class="card settings">
-        <h2>Reset</h2>
-        <p class="small">Erases everything on this device and restarts setup.</p>
-        <button class="btn small danger" data-action="resetAll">Reset & restart setup</button>
-      </section>`;
+          ${isJudge() ? `
+          <section class="card settings demo-section sec-engine">
+            <div class="list-head"><h2>Under the hood</h2><span class="demo-tag">DEMO</span></div>
+            <p class="small">Every extraction and replan produces the JSON contract from prompt.md (Phase 1–3).</p>
+            <button class="btn block" data-action="openEngine">View engine output (JSON)</button>
+            <button class="btn block" data-action="loadDemoConfirm">Reset demo to the initial scenario</button>
+          </section>` : ''}
+
+          <section class="card settings sec-reset">
+            <h2>Reset</h2>
+            <p class="small">Erases everything on this device and restarts setup.</p>
+            <button class="btn small danger" data-action="resetAll">Reset & restart setup</button>
+          </section>
+          <p class="muted small center version-text" data-action="versionTap" style="margin-top:24px; cursor:pointer; user-select:none; text-align:center;">SIKAD v1.0</p>
+        </div>
+      </div>`;
   }
   function cancellationLabel(id) {
     const [ref, date] = id.split('@');
@@ -1229,7 +1684,7 @@
   // ================================================================ SHEETS ==
   function sheet() {
     const sh = ui.sheet;
-    const inner = { dump: dumpSheet, proposal: proposalSheet, task: taskSheet, fixed: fixedSheet, clock: clockSheet, engine: engineSheet }[sh.type]();
+    const inner = { dump: dumpSheet, proposal: proposalSheet, task: taskSheet, fixed: fixedSheet, clock: clockSheet, engine: engineSheet, import: importSheet }[sh.type]();
     return `<div class="sheet-backdrop" data-action="backdrop"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
       <div class="sheet-grip" aria-hidden="true"></div><button class="icon-btn sheet-close" data-action="closeSheet" aria-label="Close">${ICON.close}</button>${inner}</div></div>`;
   }
@@ -1270,10 +1725,11 @@
         <button class="btn primary block" data-action="processDump">Send</button>
         <div class="ask-examples"><p class="small" id="ask-ex">Try asking</p>
           <div class="chips" aria-labelledby="ask-ex">${D.QUESTIONS.map((q, i) => `<button class="chip-btn" data-action="askExample" data-i="${i}">${esc(q)}</button>`).join('')}</div></div>
+        ${isJudge() ? `
         <details class="scenarios" open>
           <summary><span class="demo-tag">DEMO</span> Demo scenarios</summary>
           <div class="chips">${D.SCENARIOS.map((sc, i) => `<button class="chip-btn" data-action="scenario" data-i="${i}">${esc(sc.label)}</button>`).join('')}</div>
-        </details>
+        </details>` : ''}
         <p class="small muted">Answers are worked out from your current plan using fixed rules. No AI model is connected in this demo.</p>`}`;
   }
 
@@ -1651,7 +2107,7 @@
       ['Mon 4:45 PM (the boss texts)', T.make(2026, 10, 12, 16, 45)], ['Tue 6:00 AM', T.make(2026, 10, 13, 6, 0)], ['Wed 10:00 AM', T.make(2026, 10, 14, 10, 0)],
     ].filter(([, ms]) => ms > now());
     return `
-      <h2 id="sheet-title" tabindex="-1"><span class="demo-tag">DEMO</span> Demo clock</h2>
+      <h2 id="sheet-title" tabindex="-1">Demo clock</h2>
       <p class="sheet-sub">SIKAD is stateless about time: everything is computed from this clock. Move it forward to walk through the week. Sessions that pass without "Done" become check-ins and get rescheduled.</p>
       <label>Jump to<input type="datetime-local" id="clock-input" value="${T.toInput(now())}"></label>
       <div class="row end"><button class="btn" data-action="setClock">Set time</button></div>
@@ -1663,7 +2119,7 @@
   function engineSheet() {
     const log = state.engineLog;
     return `
-      <h2 id="sheet-title" tabindex="-1"><span class="demo-tag">DEMO</span> Engine output</h2>
+      <h2 id="sheet-title" tabindex="-1">Engine output</h2>
       <p class="sheet-sub">The structured JSON the engine returns for each request, following the contracts in prompt.md. Newest first.</p>
       ${log.map((e, i) => `
         <details class="log" ${i === 0 ? 'open' : ''}>
@@ -1673,12 +2129,46 @@
         </details>`).join('') || '<p class="muted">Nothing yet.</p>'}`;
   }
 
+  // ---------- Import sheet (Batch 6: F12) ----------
+  function importSheet() {
+    const sh = ui.sheet;
+    const items = sh.items || [];
+    const selCount = items.filter((x) => x.selected).length;
+    return `
+      <h2 id="sheet-title" tabindex="-1">Import from ${esc(sh.sourceName || 'Calendar')}</h2>
+      <p class="sheet-sub">Review items to add to your plan. You can edit titles or deadlines.</p>
+      <div class="import-list" role="list">
+        ${items.length ? items.map((it, idx) => `
+          <div class="import-item ${it.selected ? 'selected' : ''}" role="listitem">
+            <label class="toggle import-toggle">
+              <input type="checkbox" ${it.selected ? 'checked' : ''} data-bind="sheet.items.${idx}.selected" data-rerender aria-label="Select ${esc(it.title)}">
+            </label>
+            <div class="import-fields">
+              <div class="import-top">
+                <span class="chip src-chip">${esc(it.source || sh.sourceName || 'Imported')}</span>
+                <input class="import-title-input" value="${esc(it.title)}" data-bind="sheet.items.${idx}.title" placeholder="Task title">
+              </div>
+              <label class="small muted inline import-due-label">Due:
+                <input type="datetime-local" value="${it.due ? T.toInput(typeof it.due === 'number' ? it.due : new Date(it.due).getTime()) : ''}" data-bind="sheet.items.${idx}.due" data-type="dt">
+              </label>
+            </div>
+          </div>
+        `).join('') : '<p class="muted">No items found.</p>'}
+      </div>
+      <div class="sheet-actions">
+        <button class="btn ghost" data-action="closeSheet">Cancel</button>
+        <button class="btn primary" data-action="addImportedTasks" ${selCount > 0 ? '' : 'disabled'}>Add ${selCount} to plan</button>
+      </div>`;
+  }
+
   // =============================================================== ACTIONS ==
   const A = {
+    toggleJudgeDock() { ui.judgeDockOpen = !ui.judgeDockOpen; render(); },
+    versionTap() { recordVersionTap(); },
     // --- onboarding
     obNext() {
       const ob = ui.ob;
-      if (ob.step === 0) state.user.name = (ob.name || '').trim() || 'there';
+      if (ob.step === 0) state.user.name = (ob.name || '').trim();
       if (ob.step === 1) {
         state.baseline.classes = ob.classes.filter((c) => c.title.trim()).map((c) => ({ id: S.uid(state, 'c'), title: c.title.trim(), day: c.day, start: c.start, end: c.end, mode: c.mode }));
         const p1 = { extracted_commitments: state.baseline.classes.map((c) => ({ title: c.title, day_of_week: T.DAY_NAMES[c.day], start_time: c.start, end_time: c.end, type: 'fixed', mode: c.mode === 'FTF' ? 'In person' : 'Online' })), clarification_needed: null };
@@ -1715,26 +2205,46 @@
     obSampleCor() { ui.ob.corText = D.SAMPLE_COR_TEXT; A.obExtract(); },
     obExtract() {
       const ob = ui.ob;
-      const p1 = P.parseSchedule(ob.corText);
-      S.log(state, 'Phase 1 · Schedule extraction', ob.corText.slice(0, 200), p1);
-      if (p1.clarification_needed) { ob.analysis = p1.clarification_needed; ob.analysisError = true; ob.extracted = true; render(); return; }
-      ob.analysisError = false;
-      ob.classes = p1.extracted_commitments.map((c) => ({ title: c.title, day: T.DAY_NAMES.indexOf(c.day_of_week), start: c.start_time, end: c.end_time, mode: c.mode === 'Online' ? 'Online' : 'FTF' }));
-      ob.analysis = E.analyzeBaseline(ob.classes);
-      ob.extracted = true;
+      if (ob.extracting) return;
+      ob.extracting = true;
       render();
+      setTimeout(() => {
+        try {
+          const p1 = P.parseSchedule(ob.corText);
+          S.log(state, 'Phase 1 · Schedule extraction', ob.corText.slice(0, 200), p1);
+          if (p1.clarification_needed) { ob.analysis = p1.clarification_needed; ob.analysisError = true; ob.extracted = true; ob.extracting = false; render(); return; }
+          ob.analysisError = false;
+          ob.classes = p1.extracted_commitments.map((c) => ({ title: c.title, day: T.DAY_NAMES.indexOf(c.day_of_week), start: c.start_time, end: c.end_time, mode: c.mode === 'Online' ? 'Online' : 'FTF' }));
+          ob.analysis = E.analyzeBaseline(ob.classes);
+          ob.extracted = true;
+        } finally {
+          ob.extracting = false;
+          render();
+        }
+      }, 50);
     },
     obAddClass() { ui.ob.classes.push({ title: '', day: 1, start: '08:00', end: '10:00', mode: 'FTF' }); ui.ob.extracted = true; render(); },
     obRemoveClass(ds) { ui.ob.classes.splice(Number(ds.i), 1); ui.ob.analysis = E.analyzeBaseline(ui.ob.classes); render(); },
     obSampleDump() { ui.ob.dumpText = D.SAMPLE_BRAIN_DUMP; render(); },
     obParseDump() {
-      const text = (ui.ob.dumpText || '').trim();
+      const ob = ui.ob;
+      if (ob.parsingDump) return;
+      const text = (ob.dumpText || '').trim();
       if (!text) { flagField(document.getElementById('dump-ob'), 'Nothing to extract yet. Type or say what is on your plate, e.g. "Math homework due tomorrow".'); return; }
-      const parsed = P.parse(text, S.parseContext(state));
-      S.log(state, 'Phase 2 · Brain dump', text, P.toPhase2(parsed));
-      ui.ob.review = parsed.intents.map(intentToItem);
+      ob.parsingDump = true;
       render();
-      focusFirstQuestion();
+      setTimeout(() => {
+        try {
+          const parsed = P.parse(text, S.parseContext(state));
+          S.log(state, 'Phase 2 · Brain dump', text, P.toPhase2(parsed));
+          ob.review = parsed.intents.map(intentToItem);
+          render();
+          focusFirstQuestion();
+        } finally {
+          ob.parsingDump = false;
+          render();
+        }
+      }, 50);
     },
     obEditDump() { ui.ob.review = null; render(); },
     obGenerate() {
@@ -1757,9 +2267,49 @@
       };
       setTimeout(tick, 520);
     },
+    // --- tutorial
+    tutorialNext() {
+      if (ui.tutorialSlide < TUTORIAL_SLIDES.length - 1) {
+        ui.tutorialSlide++;
+        render();
+      } else {
+        A.tutorialFinish();
+      }
+    },
+    tutorialPrev() {
+      if (ui.tutorialSlide > 0) {
+        ui.tutorialSlide--;
+        render();
+      }
+    },
+    tutorialGoto(ds) {
+      const s = Number(ds.slide);
+      if (s >= 0 && s < TUTORIAL_SLIDES.length) {
+        ui.tutorialSlide = s;
+        render();
+      }
+    },
+    tutorialSkip() {
+      markTutorialSeen();
+      ui.tutorialOpen = false;
+      render();
+    },
+    tutorialFinish() {
+      markTutorialSeen();
+      ui.tutorialOpen = false;
+      render();
+    },
+    openTutorial() {
+      ui.tutorialSlide = 0;
+      ui.tutorialOpen = true;
+      render();
+    },
+
     loadDemo() {
+      markTutorialSeen();
       state = S.loadDemo(S.reset());
       ui.ob = freshOnboarding(); ui.tab = 'home'; undoSnap = null;
+      ui.tutorialOpen = false;
       ui.sheet = null; ui.askThread = []; ui.dict = null; ui.dumpDraft = null; ui.focusPick = null; ui.focusPartial = false; ui.prevPct = null; ui.error = null;
       render();
       toast("Loaded Alex's week. Try Ask SIKAD, or move the demo clock.", { ms: 6000 });
@@ -1767,10 +2317,114 @@
     loadDemoConfirm() { if (confirm('Reset the demo? This replaces all saved data with the initial Alex scenario.')) A.loadDemo(); },
     resetAll() {
       if (!confirm('Erase all data and restart setup?')) return;
+      try { localStorage.removeItem(TUTORIAL_KEY); } catch (e) {}
       state = S.reset(); ui.ob = freshOnboarding(); ui.sheet = null; undoSnap = null;
-      ui.askThread = []; ui.dict = null; ui.dumpDraft = null; ui.focusPick = null; ui.prevPct = null; ui.error = null; render();
+      ui.askThread = []; ui.dict = null; ui.dumpDraft = null; ui.focusPick = null; ui.prevPct = null; ui.error = null; ui.integrationState = {};
+      ui.tutorialOpen = true;
+      ui.tutorialSlide = 0;
+      render();
     },
-    toggleIntegration(ds) { state.integrations[ds.id] = !state.integrations[ds.id]; render(); },
+    connectIntegration(ds) {
+      const id = ds.id;
+      const adapter = window.SikadIntegrations && window.SikadIntegrations[id];
+      const st = getIntegrationState(id);
+      if (!adapter) {
+        st.status = 'unavailable';
+        render();
+        return;
+      }
+      st.status = 'connecting';
+      st.error = null;
+      render();
+
+      let cancelled = false;
+      st._cancel = () => { cancelled = true; };
+
+      adapter.connect().then((res) => {
+        if (cancelled) return;
+        st.status = 'connected';
+        st.account = res.account || '';
+        const nowTime = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const count = res.items ? res.items.length : 0;
+        st.lastSync = `Synced ${nowTime} · ${count} ${count === 1 ? 'item' : 'items'}`;
+        st.imported = res.items || [];
+        state.integrations[id] = true;
+        S.save(state);
+        if (res.items && res.items.length) {
+          const intMeta = D.INTEGRATIONS.find((x) => x.id === id);
+          ui.sheet = {
+            type: 'import',
+            id,
+            sourceName: (intMeta && intMeta.name) || 'Google Calendar',
+            items: res.items.map((it, idx) => ({
+              ...it,
+              idx,
+              selected: true,
+              due: it.due || null
+            }))
+          };
+        }
+        render();
+      }).catch((err) => {
+        if (cancelled) return;
+        st.status = 'error';
+        st.error = (err && err.message) || 'Connection failed. Check network or credentials.';
+        state.integrations[id] = false;
+        S.save(state);
+        render();
+      });
+    },
+    cancelIntegration(ds) {
+      const id = ds.id;
+      const st = getIntegrationState(id);
+      if (st && st._cancel) st._cancel();
+      st.status = 'idle';
+      st.error = null;
+      render();
+    },
+    disconnectIntegration(ds) {
+      const id = ds.id;
+      const st = getIntegrationState(id);
+      st.status = 'idle';
+      st.account = '';
+      st.lastSync = '';
+      st.imported = [];
+      st.error = null;
+      state.integrations[id] = false;
+      S.save(state);
+      render();
+    },
+    addImportedTasks() {
+      const sh = ui.sheet;
+      if (!sh || sh.type !== 'import') return;
+      const selected = (sh.items || []).filter((x) => x.selected);
+      if (!selected.length) { ui.sheet = null; render(); return; }
+      snapshot('Import tasks');
+      let count = 0;
+      for (const it of selected) {
+        let deadline = null;
+        if (it.due != null) {
+          deadline = typeof it.due === 'number' ? it.due : new Date(it.due).getTime();
+          if (isNaN(deadline)) deadline = null;
+        }
+        const title = P.titleCase((it.title || 'Untitled task').trim());
+        const task = S.makeTask(state, {
+          title,
+          type: 'assignment',
+          deadline,
+          durationMins: 60,
+          priority: 'medium',
+          source: it.source || sh.sourceName || 'Google Calendar',
+          notes: `Imported from ${it.source || sh.sourceName || 'Google Calendar'}`
+        });
+        task.source = it.source || sh.sourceName || 'Google Calendar';
+        state.tasks.push(task);
+        count++;
+      }
+      ui.sheet = null;
+      S.replan(state, `Imported ${count} ${count === 1 ? 'task' : 'tasks'} from ${sh.sourceName || 'calendar'}`);
+      render();
+    },
 
     // --- navigation
     tab(ds) { ui.tab = ds.tab; ui.focusOnly = false; render(); window.scrollTo(0, 0); },
@@ -1778,22 +2432,21 @@
     pickDay(ds) { ui.weekDay = Number(ds.day); render(); },
     showFullPlan() { ui.focusOnly = false; render(); },
     focusOnly() { ui.sheet = null; ui.tab = 'home'; ui.focusOnly = true; render(); window.scrollTo(0, 0); },
-    dismissUpdate() { state.lastUpdate = null; render(); },
-    skipToMain() { const m = document.getElementById('main'); if (m) m.focus(); },
-    toggleTheme() {
-      const html = document.documentElement;
-      html.classList.add('theme-fade');                       // colours cross-fade once (motion-spec §5.4)
-      clearTimeout(themeFade);
-      themeFade = setTimeout(() => html.classList.remove('theme-fade'), M.DUR.enter + 40);
-      applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+    dismissUpdate() {
+      if (updateDismissTimer) { clearTimeout(updateDismissTimer); updateDismissTimer = null; }
+      state.lastUpdate = null;
       render();
-      const btn = document.querySelector('.theme-toggle');
-      if (btn) btn.focus({ preventScroll: true });
+    },
+    skipToMain() { const m = document.getElementById('main'); if (m) m.focus(); },
+    setTheme(ds) { setThemeSetting(ds.theme); },
+    toggleTheme() {
+      setThemeSetting(currentTheme() === 'dark' ? 'light' : 'dark');
     },
     dismissError() { ui.error = null; render(); },
     retryError() { const sh = ui.error && ui.error.retrySheet; ui.error = null; ui.sheet = sh; render(); },
     undo() {
       if (!undoSnap) return;
+      if (updateDismissTimer) { clearTimeout(updateDismissTimer); updateDismissTimer = null; }
       const log = state.engineLog;
       state = Object.assign(S.initialState(), JSON.parse(undoSnap.json));
       state.engineLog = log;
@@ -1805,16 +2458,35 @@
 
     // --- focus card
     start(ds) {
-      ui.focusPick = ds.id; ui.focusMethod = null; ui.spotlightOff = false;
+      const s = S.findSession(state, ds.id);
+      if (!s) return;
+      const rec = F.recommend(focusContext(s, taskById(s.taskId)));
+      const opt = rec.options.find((o) => o.method === rec.method) || rec.options[0];
+      snapshot('Start session');
+      S.startSession(state, ds.id, opt.setup);
+      ui.focusPick = null; ui.focusMethod = null; ui.focusPartial = false; ui.spotlightOff = false;
+      render();
+    },
+    openFocusPicker(ds) {
+      ui.focusPick = ds.id;
+      ui.focusMethod = state.active ? state.active.method : null;
       render();
       const h = document.getElementById('method-title');
       if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
-      // The spotlit card should be fully in view: bring its top up if the expanded card runs off screen.
-      const card = document.querySelector('.focus');
-      if (card) { const r = card.getBoundingClientRect(); if (r.top < 64 || r.bottom > window.innerHeight - 96) card.scrollIntoView({ block: 'start' }); }
     },
     focusMethod(ds) { ui.focusMethod = ds.v; render(); },
     focusCancel() { ui.focusPick = null; ui.focusMethod = null; render(); },
+    focusApplyMethod(ds) {
+      const s = S.findSession(state, ds.id);
+      if (!s || !state.active) return;
+      const rec = F.recommend(focusContext(s, taskById(s.taskId)));
+      const chosen = ui.focusMethod || rec.method;
+      const opt = rec.options.find((o) => o.method === chosen) || rec.options[0];
+      Object.assign(state.active, opt.setup);
+      if (opt.setup.method) state.prefs.focusMethod = opt.setup.method;
+      ui.focusPick = null; ui.focusMethod = null;
+      render();
+    },
     focusBegin(ds) {
       const s = S.findSession(state, ds.id);
       if (!s) return;
@@ -2007,9 +2679,21 @@
       S.replan(state, `Cancelled ${o.title} (${T.short(o.start)}) — by you`, { notes: [`That frees up ${T.dur((o.end - o.start) / T.MIN)} on ${T.short(o.start)}.`] });
       render();
     },
-    removeClass(ds) { baselineChange('Removed class', () => { state.baseline.classes = state.baseline.classes.filter((c) => c.id !== ds.id); }); },
-    removeRecurring(ds) { baselineChange('Removed weekly commitment', () => { state.baseline.recurring = state.baseline.recurring.filter((r) => r.id !== ds.id); }); },
-    removeEvent(ds) { baselineChange('Removed one-time commitment', () => { state.events = state.events.filter((e) => e.id !== ds.id); }); },
+    removeClass(ds) {
+      const cls = state.baseline.classes.find((c) => c.id === ds.id);
+      const title = cls ? cls.title : 'class';
+      baselineChange(`Removed ${title}`, () => { state.baseline.classes = state.baseline.classes.filter((c) => c.id !== ds.id); }, `Removed ${title}`);
+    },
+    removeRecurring(ds) {
+      const rec = state.baseline.recurring.find((r) => r.id === ds.id);
+      const title = rec ? rec.title : 'weekly commitment';
+      baselineChange(`Removed ${title}`, () => { state.baseline.recurring = state.baseline.recurring.filter((r) => r.id !== ds.id); }, `Removed ${title}`);
+    },
+    removeEvent(ds) {
+      const ev = state.events.find((e) => e.id === ds.id);
+      const title = ev ? ev.title : 'one-time commitment';
+      baselineChange(`Removed ${title}`, () => { state.events = state.events.filter((e) => e.id !== ds.id); }, `Removed ${title}`);
+    },
     restoreOcc(ds) { baselineChange('Restored a cancelled session', () => { state.cancellations = state.cancellations.filter((c) => c !== ds.id); }); },
     addClass() {
       const f = formValues('add-class');
@@ -2060,12 +2744,12 @@
     return out;
   }
 
-  function baselineChange(trigger, fn) {
+  function baselineChange(trigger, fn, customToast) {
     snapshot(trigger);
     fn();
     S.replan(state, trigger);
     render();
-    toast('Baseline updated — plan recalculated.', { undo: true });
+    toast(customToast || 'Baseline updated — plan recalculated.', { undo: true });
   }
 
   function moveClock(ms) {
@@ -2187,6 +2871,11 @@
   });
 
   document.addEventListener('keydown', (e) => {
+    if (ui.tutorialOpen) {
+      if (e.key === 'ArrowRight') { e.preventDefault(); A.tutorialNext(); return; }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); A.tutorialPrev(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); A.tutorialSkip(); return; }
+    }
     if (e.key === 'Tab' && ui.sheet) {
       // checkVisibility() also excludes content of closed <details> (offsetParent alone does not).
       const visible = (x) => (x.checkVisibility ? x.checkVisibility() : x.offsetParent !== null);
@@ -2202,14 +2891,34 @@
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && ui.sheet && ui.sheet.type === 'dump' && ui.sheet.mode === 'input') A.processDump();
   });
 
+  // Touch swipe support for tutorial carousel
+  let touchStartX = null;
+  document.addEventListener('touchstart', (e) => {
+    if (!ui.tutorialOpen) return;
+    const c = e.target.closest('#tutorial-carousel');
+    if (c) touchStartX = e.touches[0].clientX;
+  }, { passive: true });
+
+  document.addEventListener('touchend', (e) => {
+    if (!ui.tutorialOpen || touchStartX === null) return;
+    const c = e.target.closest('#tutorial-carousel');
+    if (c && e.changedTouches && e.changedTouches.length) {
+      const diff = e.changedTouches[0].clientX - touchStartX;
+      touchStartX = null;
+      if (diff < -45) A.tutorialNext();
+      else if (diff > 45) A.tutorialPrev();
+    }
+  }, { passive: true });
+
   // Keep the toggle's icon in sync when following the OS setting and it changes.
   if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', () => { if (!document.documentElement.dataset.theme) render(); });
 
   // Tell the student if saved data was unreadable and had to be replaced.
   if (state.loadNotice) { const msg = state.loadNotice; delete state.loadNotice; setTimeout(() => toast(msg, { ms: 7000 }), 300); }
 
-  // Deep link: open the tab named in the URL (e.g. index.html#tasks).
-  if (state.onboarded && TABS.includes(location.hash.slice(1))) ui.tab = location.hash.slice(1);
+  // Listen to connectivity changes to show/hide offline banner
+  window.addEventListener('online', () => { ui.isOffline = false; render(); });
+  window.addEventListener('offline', () => { ui.isOffline = true; render(); });
 
   render();
 })();

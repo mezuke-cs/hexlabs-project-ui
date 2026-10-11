@@ -73,10 +73,10 @@
     SAMPLE_TRANSCRIPT: 'I have a work shift tomorrow from 6 PM to 10 PM.',
 
     INTEGRATIONS: [
-      { id: 'gcal', icon: '🗓️', name: 'Google Calendar', desc: 'Sync events & deadlines' },
-      { id: 'canvas', icon: '🎓', name: 'Canvas LMS', desc: 'Auto-import assignment dues' },
-      { id: 'teams', icon: '💬', name: 'MS Teams', desc: 'Sync class channels & posts' },
-      { id: 'classroom', icon: '📚', name: 'Google Classroom', desc: 'Pull classwork & announcements' },
+      { id: 'gcal', icon: 'week', name: 'Google Calendar', desc: 'Sync events & deadlines' },
+      { id: 'canvas', icon: 'doc', name: 'Canvas LMS', desc: 'Auto-import assignment dues' },
+      { id: 'teams', icon: 'braindump', name: 'MS Teams', desc: 'Sync class channels & posts' },
+      { id: 'classroom', icon: 'tasks', name: 'Google Classroom', desc: 'Pull classwork & announcements' },
     ],
   };
 
